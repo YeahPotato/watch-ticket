@@ -33,7 +33,7 @@ function App() {
   const { theme, toggle } = useTheme();
   const [update, setUpdate] = useState<Update | null>(null);
   const [updateOpen, setUpdateOpen] = useState(false);
-  const [currentVersion, setCurrentVersion] = useState("0.1.0");
+  const [currentVersion, setCurrentVersion] = useState('');
   const [checking, setChecking] = useState(false);
 
   useEffect(() => {
