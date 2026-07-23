@@ -1,7 +1,11 @@
 //! Python Sidecar 启动与生命周期管理。
 //!
-//! P3 阶段使用「开发模式」直接调用 `python-sidecar/.venv/Scripts/python.exe`，
-//! P7 打包时再切换到从 tauri resource_dir 读取 PyInstaller 产物。
+//! 两种模式：
+//!   - **Release / 打包**：从 Tauri resource_dir 加载 PyInstaller 打包好的
+//!     `sidecar/sidecar-<triple>.exe`（onedir 结构，同目录带一堆运行时依赖）。
+//!   - **Dev**：直接调用 `python-sidecar/.venv/Scripts/python.exe python-sidecar/main.py`。
+//!
+//! 优先级：resource_dir 里的打包产物 > 环境变量指定 > dev venv。
 //!
 //! 通信协议：
 //!   - 启动 sidecar 时传 `--port 0` 让系统分配空闲端口
@@ -16,6 +20,7 @@ use std::thread;
 use std::time::Duration;
 
 use serde::Deserialize;
+use tauri::{AppHandle, Manager};
 use tokio::sync::oneshot;
 use tracing::{debug, info, warn};
 
@@ -57,14 +62,56 @@ impl Drop for SidecarHandle {
     }
 }
 
-/// 定位 Python 解释器和 sidecar 脚本入口。
+/// 当前平台的 Rust target triple；用于定位 `sidecar-<triple>.exe`。
+fn current_target_triple() -> &'static str {
+    if cfg!(all(target_os = "windows", target_arch = "x86_64")) {
+        "x86_64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "windows", target_arch = "aarch64")) {
+        "aarch64-pc-windows-msvc"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(target_os = "linux") {
+        "x86_64-unknown-linux-gnu"
+    } else {
+        "unknown"
+    }
+}
+
+/// 查找 Tauri 资源目录里打包好的 sidecar exe。
 ///
-/// dev 模式查找顺序：
+/// 结构（打包后）：
+///     <resource_dir>/sidecar/sidecar-<triple>/sidecar-<triple>.exe
+///
+/// 注意：tauri.conf.json `bundle.resources` 是把 `binaries/sidecar-<triple>/**/*`
+/// 映射到 `sidecar/`，所以资源目录内的路径带上 `sidecar-<triple>/` 这一级。
+fn locate_bundled_sidecar(app: &AppHandle) -> Option<PathBuf> {
+    let resource_dir = app.path().resource_dir().ok()?;
+    let triple = current_target_triple();
+    let exe_name = if cfg!(windows) {
+        format!("sidecar-{}.exe", triple)
+    } else {
+        format!("sidecar-{}", triple)
+    };
+    let candidate = resource_dir
+        .join("sidecar")
+        .join(format!("sidecar-{}", triple))
+        .join(&exe_name);
+    if candidate.exists() {
+        Some(candidate)
+    } else {
+        debug!("bundled sidecar 不存在: {:?}", candidate);
+        None
+    }
+}
+
+/// dev 模式：查找本地 python venv + main.py。
+///
+/// 优先级：
 ///   1. 环境变量 `WATCH_TICKET_SIDECAR_PYTHON` + `WATCH_TICKET_SIDECAR_MAIN`（显式指定）
 ///   2. `<workspace>/python-sidecar/.venv/Scripts/python.exe` + `<workspace>/python-sidecar/main.py`
-///
-/// `<workspace>` 是 `src-tauri` 的父目录（因为 tauri dev 的 cwd 是 `src-tauri/`）。
-fn locate_sidecar() -> AppResult<(PathBuf, PathBuf)> {
+fn locate_dev_sidecar() -> AppResult<(PathBuf, PathBuf)> {
     if let (Ok(py), Ok(main)) = (
         std::env::var("WATCH_TICKET_SIDECAR_PYTHON"),
         std::env::var("WATCH_TICKET_SIDECAR_MAIN"),
@@ -72,7 +119,6 @@ fn locate_sidecar() -> AppResult<(PathBuf, PathBuf)> {
         return Ok((PathBuf::from(py), PathBuf::from(main)));
     }
 
-    // 从当前工作目录向上找 python-sidecar
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
     let candidates = [
         cwd.clone(),
@@ -93,7 +139,7 @@ fn locate_sidecar() -> AppResult<(PathBuf, PathBuf)> {
     }
 
     Err(AppError::Sidecar(format!(
-        "找不到 python-sidecar。cwd={:?}，请检查项目结构或设置 WATCH_TICKET_SIDECAR_PYTHON/MAIN",
+        "找不到 python-sidecar。cwd={:?}，请设置 WATCH_TICKET_SIDECAR_PYTHON/MAIN 或安装 .venv",
         cwd
     )))
 }
@@ -111,14 +157,25 @@ fn hide_console(_cmd: &mut Command) {}
 
 /// 拉起 sidecar 并等待其发出 ready 事件。
 ///
+/// 拉起策略：优先 bundled（release）→ 再 dev venv。
+///
 /// * `startup_timeout` 首行输出的等待时长；超时视为启动失败。
-pub async fn spawn_sidecar(startup_timeout: Duration) -> AppResult<SidecarHandle> {
-    let (python, main_py) = locate_sidecar()?;
-    info!("启动 sidecar: {:?} {:?}", python, main_py);
+pub async fn spawn_sidecar(
+    app: &AppHandle,
+    startup_timeout: Duration,
+) -> AppResult<SidecarHandle> {
+    let mut cmd = if let Some(exe) = locate_bundled_sidecar(app) {
+        info!("启动 bundled sidecar: {:?}", exe);
+        Command::new(exe)
+    } else {
+        let (python, main_py) = locate_dev_sidecar()?;
+        info!("启动 dev sidecar: {:?} {:?}", python, main_py);
+        let mut c = Command::new(python);
+        c.arg(main_py);
+        c
+    };
 
-    let mut cmd = Command::new(&python);
-    cmd.arg(&main_py)
-        .arg("--port")
+    cmd.arg("--port")
         .arg("0")
         .stdin(Stdio::null())
         .stdout(Stdio::piped())

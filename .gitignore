@@ -37,7 +37,7 @@ python-sidecar/.venv/
 python-sidecar/venv/
 python-sidecar/build/
 python-sidecar/dist/
-python-sidecar/*.spec
+python-sidecar/*.spec.bak
 
 # SQLite / runtime data
 *.db

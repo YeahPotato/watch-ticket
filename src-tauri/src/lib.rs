@@ -54,7 +54,7 @@ pub fn run() {
             let state = tauri::async_runtime::block_on(async {
                 // 1) 启动 sidecar
                 let sidecar =
-                    crate::sidecar::spawn_sidecar(Duration::from_secs(15)).await?;
+                    crate::sidecar::spawn_sidecar(&handle, Duration::from_secs(30)).await?;
                 let port = sidecar.port();
                 info!("sidecar 就绪，port={}", port);
 

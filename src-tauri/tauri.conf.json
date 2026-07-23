@@ -35,6 +35,9 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "binaries/sidecar-x86_64-pc-windows-msvc/**/*": "sidecar/"
+    },
     "windows": {
       "wix": {
         "language": ["zh-CN"]

@@ -8,7 +8,7 @@ __pycache__/
 # PyInstaller
 build/
 dist/
-*.spec
+*.spec.bak
 
 # 环境
 .env
