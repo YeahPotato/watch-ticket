@@ -1,0 +1,73 @@
+name: Release
+
+# 推 v* tag 触发（如 v0.1.0）。仅打包 Windows msi 并挂到 Release，同步生成 latest.json 供 tauri-plugin-updater 使用。
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build-tauri:
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 9
+
+      - name: Setup Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
+
+      - name: Setup Python (for sidecar)
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # ⚠️ 当前项目 sidecar 尚未有 PyInstaller 打包脚本（python-sidecar/build.py 不存在）。
+      # msi 里不会包含 sidecar 可执行文件；此 workflow 只保证前端 + Rust 端能打包、更新链路可跑通。
+      # 后续补齐 sidecar 打包后，把下方注释区放开，并在 tauri.conf.json 的 bundle.externalBin 中配置。
+      #
+      # - name: Build Python sidecar (PyInstaller)
+      #   run: |
+      #     python -m pip install --upgrade pip
+      #     pip install -r python-sidecar/requirements.txt pyinstaller
+      #     python python-sidecar/build.py
+
+      - name: Install frontend deps
+        run: pnpm install --frozen-lockfile
+
+      - name: Build & release Tauri (Windows msi)
+        uses: tauri-apps/tauri-action@v0
+        env:
+          # Release 上传所需
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # updater 签名密钥（在本地 `pnpm tauri signer generate` 生成后配置到 Repo Secrets）
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          # tag 名与 conf 版本匹配。已推 tag 则复用之，否则创建 draft。
+          tagName: ${{ github.ref_name }}
+          releaseName: "WatchTicket ${{ github.ref_name }}"
+          releaseBody: "自动构建。详见 CHANGELOG / commit。"
+          releaseDraft: false
+          prerelease: false
+          # 只打 msi。tauri-action 会额外生成 latest.json（updater manifest）并一并上传。
+          args: --bundles msi
