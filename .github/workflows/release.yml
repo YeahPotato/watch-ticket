@@ -54,6 +54,9 @@ jobs:
           pip install -r requirements-build.txt
 
       - name: Build Python sidecar (PyInstaller onedir)
+        env:
+          PYTHONIOENCODING: utf-8
+          PYTHONUTF8: "1"
         run: python python-sidecar/build.py
 
       - name: Install frontend deps

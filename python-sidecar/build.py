@@ -21,6 +21,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+# 强制 stdout/stderr 走 UTF-8。
+# Windows CI runner 默认 cp1252，中文 print 会 UnicodeEncodeError。
+# 本地中文 Windows 一般是 cp936，同样受益。
+for _stream_name in ("stdout", "stderr"):
+    _stream = getattr(sys, _stream_name, None)
+    if _stream is not None and hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8")
+        except Exception:
+            pass
+
 
 ROOT = Path(__file__).resolve().parent          # python-sidecar/
 PROJECT_ROOT = ROOT.parent                       # 项目根
