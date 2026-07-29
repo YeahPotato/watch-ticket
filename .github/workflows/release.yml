@@ -68,10 +68,25 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
           TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # 让 WiX light.exe 的原始 stderr 打到 job 日志里，便于定位 LGHT0xxx
+          RUST_LOG: debug
+          RUST_BACKTRACE: "1"
         with:
           tagName: ${{ github.ref_name }}
           releaseName: "WatchTicket ${{ github.ref_name }}"
           releaseBody: "自动构建。详见 CHANGELOG / commit。"
           releaseDraft: false
           prerelease: false
-          args: --bundles msi
+          args: --bundles msi --verbose
+
+      # 即使 tauri build 失败也上传 WiX 中间产物，便于排查 light.exe 报错
+      - name: Upload WiX intermediates on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wix-debug
+          path: |
+            src-tauri/target/release/wix/**/*
+            src-tauri/target/release/bundle/**/*
+          if-no-files-found: ignore
+          retention-days: 7
