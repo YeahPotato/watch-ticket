@@ -82,10 +82,11 @@ fn current_target_triple() -> &'static str {
 /// 查找 Tauri 资源目录里打包好的 sidecar exe。
 ///
 /// 结构（打包后）：
-///     <resource_dir>/sidecar/sidecar-<triple>/sidecar-<triple>.exe
+///     <resource_dir>/sidecar/sidecar-<triple>.exe
+///     <resource_dir>/sidecar/_internal/...          (PyInstaller onedir 依赖)
 ///
-/// 注意：tauri.conf.json `bundle.resources` 是把 `binaries/sidecar-<triple>/**/*`
-/// 映射到 `sidecar/`，所以资源目录内的路径带上 `sidecar-<triple>/` 这一级。
+/// tauri.conf.json 里 `bundle.resources` 把源目录
+/// `binaries/sidecar-<triple>/` 整个映射到 `sidecar/`，保留内部结构。
 fn locate_bundled_sidecar(app: &AppHandle) -> Option<PathBuf> {
     let resource_dir = app.path().resource_dir().ok()?;
     let triple = current_target_triple();
@@ -94,10 +95,7 @@ fn locate_bundled_sidecar(app: &AppHandle) -> Option<PathBuf> {
     } else {
         format!("sidecar-{}", triple)
     };
-    let candidate = resource_dir
-        .join("sidecar")
-        .join(format!("sidecar-{}", triple))
-        .join(&exe_name);
+    let candidate = resource_dir.join("sidecar").join(&exe_name);
     if candidate.exists() {
         Some(candidate)
     } else {
