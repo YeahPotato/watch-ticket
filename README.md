@@ -68,6 +68,13 @@ pnpm sidecar:dev
 pnpm sidecar:build
 ```
 
+## 发布
+
+- 提交修改，更新package.json , tauri.conf.json的版本
+- git tag new-tag && git push origin new-tag
+
+
+
 ## 实施进度
 
 - [x] P1 项目脚手架
