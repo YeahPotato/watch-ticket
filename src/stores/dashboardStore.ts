@@ -9,7 +9,7 @@ import { create } from "zustand";
 
 import { api } from "@/api/tauri";
 
-export type WidgetType = "watchlist" | "intraday" | "alerts";
+export type WidgetType = "watchlist" | "intraday" | "alerts" | "analysis";
 
 export interface WidgetItem {
   id: string;
@@ -75,6 +75,7 @@ const DEFAULT_SIZE: Record<WidgetType, { w: number; h: number }> = {
   watchlist: { w: 12, h: 8 },
   intraday: { w: 12, h: 12 },
   alerts: { w: 6, h: 6 },
+  analysis: { w: 12, h: 8 },
 };
 
 export const useDashboardStore = create<DashboardState>((set, get) => ({
@@ -90,7 +91,7 @@ export const useDashboardStore = create<DashboardState>((set, get) => ({
         try {
           const parsed = JSON.parse(raw) as WidgetItem[];
           // 过滤掉已废弃的 widget 类型（如老版本保存的 kline）
-          const allowed: WidgetType[] = ["watchlist", "intraday", "alerts"];
+          const allowed: WidgetType[] = ["watchlist", "intraday", "alerts", "analysis"];
           const cleaned = Array.isArray(parsed)
             ? parsed.filter(
                 (w) =>

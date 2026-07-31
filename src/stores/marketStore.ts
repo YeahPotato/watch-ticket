@@ -37,6 +37,7 @@ interface MarketState {
     klinePeriods?: string,
   ) => Promise<void>;
   removeSymbol: (symbol: string) => Promise<void>;
+  updateNote: (symbol: string, note: string) => Promise<void>;
 }
 
 export const useMarketStore = create<MarketState>((set, get) => ({
@@ -67,6 +68,22 @@ export const useMarketStore = create<MarketState>((set, get) => ({
     const q = { ...get().quotes };
     delete q[symbol];
     set({ quotes: q });
+  },
+
+  updateNote: async (symbol, note) => {
+    // 乐观更新本地 subscription 的 note
+    const subs = get().subscriptions.map((s) =>
+      s.symbol === symbol ? { ...s, note } : s,
+    );
+    set({ subscriptions: subs });
+    try {
+      await api.updateSubscriptionNote(symbol, note);
+      // 后端会 emit subscription:changed，届时会用后端 truth 覆盖本地状态
+    } catch (e) {
+      console.warn("保存备注失败", e);
+      // 失败时不主动 revert，一段时间后 subscription:changed 会矫正
+      throw e;
+    }
   },
 }));
 

@@ -211,6 +211,208 @@ pub fn detect_crosses(points: &[KlinePoint]) -> Vec<DetectedCross> {
     out
 }
 
+// ==================== RSI ====================
+
+/// RSI (Wilder 平滑)。返回长度 = closes.len()，前 period 根为 None。
+///
+/// 计算：
+///   gain / loss 用 period 长度 Wilder 平滑：
+///     avg_gain[i] = (avg_gain[i-1] * (period - 1) + gain[i]) / period
+///   RSI = 100 - 100 / (1 + avg_gain / avg_loss)
+pub fn rsi(closes: &[f64], period: usize) -> Vec<Option<f64>> {
+    let n = closes.len();
+    let mut out = vec![None; n];
+    if n <= period || period == 0 {
+        return out;
+    }
+
+    // 初始 avg_gain / avg_loss：前 period 根的算术平均
+    let mut gains_sum = 0.0;
+    let mut losses_sum = 0.0;
+    for i in 1..=period {
+        let diff = closes[i] - closes[i - 1];
+        if diff >= 0.0 {
+            gains_sum += diff;
+        } else {
+            losses_sum -= diff;
+        }
+    }
+    let mut avg_gain = gains_sum / period as f64;
+    let mut avg_loss = losses_sum / period as f64;
+    out[period] = Some(compute_rsi(avg_gain, avg_loss));
+
+    // Wilder 递推
+    for i in (period + 1)..n {
+        let diff = closes[i] - closes[i - 1];
+        let (g, l) = if diff >= 0.0 { (diff, 0.0) } else { (0.0, -diff) };
+        avg_gain = (avg_gain * (period as f64 - 1.0) + g) / period as f64;
+        avg_loss = (avg_loss * (period as f64 - 1.0) + l) / period as f64;
+        out[i] = Some(compute_rsi(avg_gain, avg_loss));
+    }
+    out
+}
+
+fn compute_rsi(avg_gain: f64, avg_loss: f64) -> f64 {
+    if avg_loss < f64::EPSILON {
+        100.0
+    } else {
+        let rs = avg_gain / avg_loss;
+        100.0 - 100.0 / (1.0 + rs)
+    }
+}
+
+// ==================== KDJ ====================
+
+#[derive(Debug, Clone, Copy)]
+pub struct KdjPoint {
+    pub k: f64,
+    pub d: f64,
+    pub j: f64,
+}
+
+/// KDJ 指标（默认 9, 3, 3）。
+///
+/// 计算：
+///   RSV = (close - lowest_low_n) / (highest_high_n - lowest_low_n) * 100
+///   K   = (2/3) * prev_K + (1/3) * RSV     (init: K[0]=50)
+///   D   = (2/3) * prev_D + (1/3) * K       (init: D[0]=50)
+///   J   = 3*K - 2*D
+///
+/// 前 n-1 根为 None（预热窗口不足）。
+pub fn kdj(
+    highs: &[f64],
+    lows: &[f64],
+    closes: &[f64],
+    n: usize,
+    k_smooth: usize,
+    d_smooth: usize,
+) -> Vec<Option<KdjPoint>> {
+    let len = closes.len();
+    let mut out = vec![None; len];
+    if len < n || n == 0 || k_smooth == 0 || d_smooth == 0 {
+        return out;
+    }
+
+    // 平滑系数：Wilder 常用简写 alpha = 1/smooth，权重 = (smooth-1)/smooth
+    let ak = 1.0 / k_smooth as f64;
+    let ad = 1.0 / d_smooth as f64;
+
+    let mut prev_k = 50.0;
+    let mut prev_d = 50.0;
+
+    for i in (n - 1)..len {
+        let hh = highs[(i + 1 - n)..=i]
+            .iter()
+            .cloned()
+            .fold(f64::NEG_INFINITY, f64::max);
+        let ll = lows[(i + 1 - n)..=i]
+            .iter()
+            .cloned()
+            .fold(f64::INFINITY, f64::min);
+        let denom = hh - ll;
+        let rsv = if denom.abs() < f64::EPSILON {
+            50.0
+        } else {
+            (closes[i] - ll) / denom * 100.0
+        };
+        let k = ak * rsv + (1.0 - ak) * prev_k;
+        let d = ad * k + (1.0 - ad) * prev_d;
+        let j = 3.0 * k - 2.0 * d;
+        out[i] = Some(KdjPoint { k, d, j });
+        prev_k = k;
+        prev_d = d;
+    }
+    out
+}
+
+// ==================== Bollinger Bands ====================
+
+#[derive(Debug, Clone, Copy)]
+pub struct BollPoint {
+    pub upper: f64,
+    #[allow(dead_code)]
+    pub mid: f64,
+    pub lower: f64,
+    /// 带宽 = (upper - lower) / mid，反映波动率
+    #[allow(dead_code)]
+    pub bandwidth: f64,
+}
+
+/// 布林带（默认 period=20, k=2）。
+///
+/// 中轨 = SMA(close, period)
+/// std  = 总体标准差（除以 N，不做贝塞尔校正，与主流实现一致）
+/// 上轨 = 中轨 + k * std
+/// 下轨 = 中轨 - k * std
+pub fn bollinger(closes: &[f64], period: usize, k: f64) -> Vec<Option<BollPoint>> {
+    let len = closes.len();
+    let mut out = vec![None; len];
+    if len < period || period == 0 {
+        return out;
+    }
+    for i in (period - 1)..len {
+        let slice = &closes[(i + 1 - period)..=i];
+        let mean = slice.iter().sum::<f64>() / period as f64;
+        let var =
+            slice.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / period as f64;
+        let sd = var.sqrt();
+        let upper = mean + k * sd;
+        let lower = mean - k * sd;
+        let bandwidth = if mean.abs() > f64::EPSILON {
+            (upper - lower) / mean
+        } else {
+            0.0
+        };
+        out[i] = Some(BollPoint {
+            upper,
+            mid: mean,
+            lower,
+            bandwidth,
+        });
+    }
+    out
+}
+
+// ==================== OBV ====================
+
+/// OBV 能量潮：
+///   OBV[0] = 0
+///   OBV[i] = OBV[i-1] + volume[i]  当 close[i] > close[i-1]
+///           OBV[i-1] - volume[i]  当 close[i] < close[i-1]
+///           OBV[i-1]              相等
+///
+/// volume 中为 None 视为 0。
+pub fn obv(closes: &[f64], volumes: &[Option<f64>]) -> Vec<f64> {
+    let n = closes.len();
+    let mut out = vec![0.0; n];
+    if n == 0 {
+        return out;
+    }
+    for i in 1..n {
+        let v = volumes.get(i).and_then(|x| *x).unwrap_or(0.0);
+        let prev = out[i - 1];
+        out[i] = if closes[i] > closes[i - 1] {
+            prev + v
+        } else if closes[i] < closes[i - 1] {
+            prev - v
+        } else {
+            prev
+        };
+    }
+    out
+}
+
+// ==================== 简单均值 ====================
+
+/// 算术平均。空返回 None。
+pub fn arithmetic_mean(values: &[f64]) -> Option<f64> {
+    if values.is_empty() {
+        None
+    } else {
+        Some(values.iter().sum::<f64>() / values.len() as f64)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -292,5 +494,51 @@ mod tests {
             classify_alert_kind(CrossKind::Golden, 0.05, 0.0, t),
             "golden_add"
         );
+    }
+
+    #[test]
+    fn rsi_boundary_values() {
+        // 全部上涨 → RSI 应接近 100
+        let up: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let r = rsi(&up, 14);
+        assert_eq!(r.len(), 20);
+        assert!(r[14].is_some());
+        assert!(r[19].unwrap() > 95.0, "全升 RSI 应 >95: {:?}", r[19]);
+
+        // 全部下跌 → RSI 应接近 0
+        let down: Vec<f64> = (1..=20).rev().map(|i| i as f64).collect();
+        let r2 = rsi(&down, 14);
+        assert!(r2[19].unwrap() < 5.0, "全降 RSI 应 <5: {:?}", r2[19]);
+    }
+
+    #[test]
+    fn kdj_reaches_bounds() {
+        // 单调上升 → K/D 应接近 100
+        let highs: Vec<f64> = (1..=20).map(|i| i as f64).collect();
+        let lows: Vec<f64> = highs.iter().map(|v| v - 0.5).collect();
+        let closes = highs.clone();
+        let k = kdj(&highs, &lows, &closes, 9, 3, 3);
+        let last = k[19].expect("KDJ 末值应存在");
+        assert!(last.k > 80.0 && last.d > 80.0, "上升趋势 KDJ 应 >80: {:?}", last);
+    }
+
+    #[test]
+    fn bollinger_mid_equals_sma() {
+        let closes = vec![10.0, 12.0, 11.0, 13.0, 14.0, 15.0, 16.0, 17.0, 18.0, 19.0, 20.0];
+        let b = bollinger(&closes, 5, 2.0);
+        assert!(b[3].is_none());
+        let p = b[4].expect("第 5 根有值");
+        let expected_mid = (10.0 + 12.0 + 11.0 + 13.0 + 14.0) / 5.0;
+        assert!((p.mid - expected_mid).abs() < 1e-9);
+        assert!(p.upper > p.mid && p.lower < p.mid);
+    }
+
+    #[test]
+    fn obv_accumulates() {
+        let closes = vec![10.0, 11.0, 10.5, 12.0];
+        let vols = vec![Some(100.0), Some(200.0), Some(150.0), Some(300.0)];
+        let o = obv(&closes, &vols);
+        // 0, +200, -150, +300 → 0, 200, 50, 350
+        assert_eq!(o, vec![0.0, 200.0, 50.0, 350.0]);
     }
 }

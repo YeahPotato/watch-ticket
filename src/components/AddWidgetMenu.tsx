@@ -4,7 +4,7 @@
  */
 
 import { useState } from "react";
-import { Activity, Bell, LayoutGrid } from "lucide-react";
+import { Activity, Bell, LayoutGrid, LineChart } from "lucide-react";
 
 import { Button } from "@/components/ui/button";
 import {
@@ -66,6 +66,11 @@ export function AddWidgetMenu() {
             ))}
           </DropdownMenuSubContent>
         </DropdownMenuSub>
+
+        <DropdownMenuItem onClick={() => addWidget({ type: "analysis" })}>
+          <LineChart className="mr-2 h-4 w-4" />
+          量化分析
+        </DropdownMenuItem>
 
         <DropdownMenuItem onClick={() => addWidget({ type: "alerts" })}>
           <Bell className="mr-2 h-4 w-4" />

@@ -11,7 +11,7 @@ use crate::models::{Alert, IntradayPoint, KlinePoint, Quote, Subscription};
 
 pub async fn list_subscriptions(pool: &SqlitePool) -> AppResult<Vec<Subscription>> {
     let rows = sqlx::query(
-        r#"SELECT id, symbol, name, market, kline_periods, sort_order, added_at
+        r#"SELECT id, symbol, name, market, kline_periods, sort_order, added_at, note
              FROM subscriptions
              ORDER BY sort_order ASC, id ASC"#,
     )
@@ -28,6 +28,7 @@ pub async fn list_subscriptions(pool: &SqlitePool) -> AppResult<Vec<Subscription
             kline_periods: r.get::<String, _>("kline_periods"),
             sort_order: r.get::<i64, _>("sort_order"),
             added_at: r.get::<String, _>("added_at"),
+            note: r.try_get::<String, _>("note").unwrap_or_default(),
         });
     }
     Ok(out)
@@ -65,7 +66,7 @@ pub async fn get_subscription(
     symbol: &str,
 ) -> AppResult<Option<Subscription>> {
     let row = sqlx::query(
-        r#"SELECT id, symbol, name, market, kline_periods, sort_order, added_at
+        r#"SELECT id, symbol, name, market, kline_periods, sort_order, added_at, note
              FROM subscriptions WHERE symbol = ?"#,
     )
     .bind(symbol)
@@ -80,6 +81,7 @@ pub async fn get_subscription(
         kline_periods: r.get::<String, _>("kline_periods"),
         sort_order: r.get::<i64, _>("sort_order"),
         added_at: r.get::<String, _>("added_at"),
+        note: r.try_get::<String, _>("note").unwrap_or_default(),
     }))
 }
 
@@ -98,6 +100,19 @@ pub async fn update_periods(
 ) -> AppResult<()> {
     sqlx::query("UPDATE subscriptions SET kline_periods = ? WHERE symbol = ?")
         .bind(kline_periods)
+        .bind(symbol)
+        .execute(pool)
+        .await?;
+    Ok(())
+}
+
+pub async fn update_note(
+    pool: &SqlitePool,
+    symbol: &str,
+    note: &str,
+) -> AppResult<()> {
+    sqlx::query("UPDATE subscriptions SET note = ? WHERE symbol = ?")
+        .bind(note)
         .bind(symbol)
         .execute(pool)
         .await?;

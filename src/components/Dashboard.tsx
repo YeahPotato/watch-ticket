@@ -14,6 +14,7 @@ import {
 import { WatchListWidget } from "@/components/widgets/WatchListWidget";
 import { IntradayChartWidget } from "@/components/widgets/IntradayChartWidget";
 import { AlertPanelWidget } from "@/components/widgets/AlertPanelWidget";
+import { AnalysisWidget } from "@/components/widgets/AnalysisWidget";
 
 const ResponsiveGridLayout = WidthProvider(Responsive);
 
@@ -37,6 +38,8 @@ function renderWidget(
       );
     case "alerts":
       return <AlertPanelWidget onClose={onClose} />;
+    case "analysis":
+      return <AnalysisWidget onClose={onClose} />;
     default:
       return null;
   }
@@ -72,7 +75,7 @@ export function Dashboard() {
       w: w.w,
       h: w.h,
       minW:
-        w.type === "watchlist"
+        w.type === "watchlist" || w.type === "analysis"
           ? 6
           : w.type === "alerts"
             ? 3
@@ -105,9 +108,12 @@ export function Dashboard() {
       cols={{ lg: 12, md: 12, sm: 12 }}
       rowHeight={40}
       draggableHandle=".widget-drag-handle"
+      draggableCancel="button,input,select,textarea,label,a,[role='combobox'],[role='button']"
       onLayoutChange={(current) => applyLayout(current)}
       margin={[10, 10]}
       containerPadding={[0, 0]}
+      isResizable={true}
+      resizeHandles={["se"]}
     >
       {widgets.map((w) => (
         <div key={w.id} className="relative h-full">

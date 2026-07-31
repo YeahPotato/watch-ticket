@@ -6,13 +6,19 @@ import react from "@vitejs/plugin-react";
 const host = process.env.TAURI_DEV_HOST;
 
 // https://vite.dev/config/
-export default defineConfig(async () => ({
+export default defineConfig(async ({ mode }) => ({
   plugins: [react()],
 
   resolve: {
     alias: {
       "@": path.resolve(__dirname, "./src"),
     },
+  },
+
+  // react-draggable 等库在浏览器里访问 process.env.NODE_ENV，
+  // Vite 默认不 polyfill process，需要显式 define，否则会抛 ReferenceError
+  define: {
+    "process.env.NODE_ENV": JSON.stringify(mode),
   },
 
   // Vite options tailored for Tauri development and only applied in `tauri dev` or `tauri build`

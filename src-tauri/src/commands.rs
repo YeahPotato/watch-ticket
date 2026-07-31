@@ -8,7 +8,9 @@ use tracing::warn;
 use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::events::{IntradayUpdated, SubscriptionChanged, EV_INTRADAY_UPDATED, EV_SUBSCRIPTION_CHANGED};
-use crate::models::{Alert, IntradayPoint, KlinePoint, PingInfo, Quote, SearchItem, Subscription};
+use crate::models::{
+    Alert, AnalysisReport, IntradayPoint, KlinePoint, PingInfo, Quote, SearchItem, Subscription,
+};
 use crate::repo;
 use crate::state::AppState;
 
@@ -155,6 +157,20 @@ pub async fn update_subscription_periods(
     Ok(())
 }
 
+/// 更新股票备注（自由文本）。不影响调度，仅广播订阅变更让前端刷新。
+#[tauri::command]
+pub async fn update_subscription_note(
+    app: AppHandle,
+    state: State<'_, AppState>,
+    symbol: String,
+    note: String,
+) -> AppResult<()> {
+    repo::update_note(&state.db, &symbol.trim().to_uppercase(), &note).await?;
+    let all = repo::list_subscriptions(&state.db).await.unwrap_or_default();
+    emit_subscription_changed(&app, all).await;
+    Ok(())
+}
+
 // =============== 缓存查询（读 DB） ===============
 
 #[tauri::command]
@@ -248,4 +264,44 @@ pub async fn clear_alerts(
     older_than_days: Option<i64>,
 ) -> AppResult<u64> {
     repo::clear_alerts_older_than(&state.db, older_than_days.unwrap_or(30)).await
+}
+
+// =============== 量化分析 ===============
+
+/// 拉取指定周期最近 `bars` 根 K 线并做综合量化分析。
+///
+/// - `period`：1d / 1w / 1M
+/// - `bars`：K 线根数。默认 750（≈ 3 年日 K），上限 2000。
+#[tauri::command]
+pub async fn analyze_symbol(
+    state: State<'_, AppState>,
+    symbol: String,
+    period: Option<String>,
+    bars: Option<i64>,
+) -> AppResult<AnalysisReport> {
+    let period = period.unwrap_or_else(|| "1d".to_string());
+    let bars = bars.unwrap_or(750).clamp(60, 2000);
+
+    let points = state
+        .ak
+        .get_kline(&symbol, &period, bars)
+        .await
+        .map_err(|e| AppError::msg(format!("拉取 K 线失败: {}", e)))?;
+
+    if points.is_empty() {
+        return Err(AppError::msg("K 线数据为空"));
+    }
+
+    Ok(crate::analyzer::analyze(symbol, period, points))
+}
+
+// =============== 交易时段查询 ===============
+
+/// 判断指定市场当前是否处于交易时段。
+///
+/// 供前端定时刷新时决定是否发起请求，避免收盘时段无意义地打 sidecar。
+/// 市场标识："SH" / "SZ" / "BJ" / "HK" / "US"；未知市场返回 false。
+#[tauri::command]
+pub fn is_market_open(market: String) -> bool {
+    crate::market_time::is_market_open(&market)
 }

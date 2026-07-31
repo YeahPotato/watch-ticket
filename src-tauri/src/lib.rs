@@ -1,6 +1,7 @@
 //! Watch Ticket · 应用装配入口。
 
 mod akshare_client;
+mod analyzer;
 mod commands;
 mod db;
 mod error;
@@ -105,6 +106,7 @@ pub fn run() {
             commands::add_subscription,
             commands::remove_subscription,
             commands::update_subscription_periods,
+            commands::update_subscription_note,
             commands::get_cached_kline,
             commands::refresh_intraday,
             commands::list_settings,
@@ -115,6 +117,8 @@ pub fn run() {
             commands::ack_all_alerts,
             commands::count_unack_alerts,
             commands::clear_alerts,
+            commands::analyze_symbol,
+            commands::is_market_open,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

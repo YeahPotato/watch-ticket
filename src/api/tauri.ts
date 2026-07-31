@@ -65,6 +65,8 @@ export interface Subscription {
   kline_periods: string;
   sort_order: number;
   added_at: string;
+  /** 用户自由文本备注（可为空字符串） */
+  note: string;
 }
 
 export interface Alert {
@@ -88,6 +90,56 @@ export interface Alert {
   price: number | null;
   acknowledged: boolean;
   created_at: string;
+}
+
+export interface AnalysisIndicator {
+  name: string;
+  /** [-2, +2] */
+  score: number;
+  detail: string;
+}
+
+/** 建议价参考位（支撑/压力位来源） */
+export interface PriceRefs {
+  boll: number | null;
+  ema20: number | null;
+  extreme_20d: number;
+}
+
+/** 建议加仓或减仓价 */
+export interface PriceSuggestion {
+  /** 保守价：更远离现价 */
+  advised: number;
+  /** 触发价：较易触及，实盘挂单参考 */
+  trigger: number;
+  support: number;
+  refs: PriceRefs;
+  /** 加仓：avg×0.95/0.92/0.90；减仓：avg×1.05/1.08/1.10；均价缺失时全 NaN */
+  discount_tiers: [number, number, number];
+}
+
+/** 量化分析评级 key */
+export type AnalysisRating =
+  | "strong_buy"
+  | "watch_buy"
+  | "hold"
+  | "watch_sell"
+  | "strong_sell";
+
+export interface AnalysisReport {
+  symbol: string;
+  period: string;
+  bars: number;
+  last_close: number;
+  avg_price: number | null;
+  avg_deviation_pct: number | null;
+  composite_score: number;
+  rating: AnalysisRating;
+  rating_label: string;
+  indicators: AnalysisIndicator[];
+  reason: string;
+  buy_suggestion: PriceSuggestion | null;
+  sell_suggestion: PriceSuggestion | null;
 }
 
 /** Rust 返回的错误结构 */
@@ -127,6 +179,8 @@ export const api = {
       symbol,
       klinePeriods,
     }),
+  updateSubscriptionNote: (symbol: string, note: string) =>
+    invoke<void>("update_subscription_note", { symbol, note }),
 
   // 缓存查询
   getCachedKline: (symbol: string, period: string, limit = 500) =>
@@ -151,4 +205,12 @@ export const api = {
   countUnackAlerts: () => invoke<number>("count_unack_alerts"),
   clearAlerts: (olderThanDays = 30) =>
     invoke<number>("clear_alerts", { olderThanDays }),
+
+  // 量化分析
+  analyzeSymbol: (symbol: string, period = "1d", bars = 750) =>
+    invoke<AnalysisReport>("analyze_symbol", { symbol, period, bars }),
+
+  // 交易时段查询（供前端定时任务判断）
+  isMarketOpen: (market: string) =>
+    invoke<boolean>("is_market_open", { market }),
 };
