@@ -17,7 +17,9 @@ mod state;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tauri::Manager;
+use tauri::menu::{MenuBuilder, MenuItemBuilder, PredefinedMenuItem};
+use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
+use tauri::{Manager, WindowEvent};
 use tracing::{error, info};
 use tracing_subscriber::EnvFilter;
 
@@ -87,14 +89,76 @@ pub fn run() {
             })?;
 
             app.manage(state);
+
+            // 构建系统托盘（Windows）
+            // 菜单：关于（disabled，仅显示版本号） + 分隔线 + 退出
+            let version = handle.package_info().version.to_string();
+            let about_label = format!("关于 Watch Ticket v{}", version);
+            let about_item = MenuItemBuilder::with_id("about", &about_label)
+                .enabled(false)
+                .build(&handle)?;
+            let quit_item = MenuItemBuilder::with_id("quit", "退出").build(&handle)?;
+            let sep = PredefinedMenuItem::separator(&handle)?;
+            let tray_menu = MenuBuilder::new(&handle)
+                .item(&about_item)
+                .item(&sep)
+                .item(&quit_item)
+                .build()?;
+
+            TrayIconBuilder::with_id("main-tray")
+                .icon(handle.default_window_icon().cloned().unwrap())
+                .tooltip("Watch Ticket · 行情监听")
+                .menu(&tray_menu)
+                // 左键单击时不弹菜单，交给下面的 on_tray_icon_event 处理
+                .show_menu_on_left_click(false)
+                .on_menu_event(|app, event| match event.id().as_ref() {
+                    "quit" => {
+                        info!("托盘菜单：退出");
+                        app.exit(0);
+                    }
+                    _ => {}
+                })
+                .on_tray_icon_event(|tray, event| {
+                    // 左键单击：切换主窗口显示/隐藏
+                    if let TrayIconEvent::Click {
+                        button: MouseButton::Left,
+                        button_state: MouseButtonState::Up,
+                        ..
+                    } = event
+                    {
+                        let app = tray.app_handle();
+                        if let Some(window) = app.get_webview_window("main") {
+                            match window.is_visible() {
+                                Ok(true) => {
+                                    let _ = window.hide();
+                                }
+                                _ => {
+                                    let _ = window.show();
+                                    let _ = window.unminimize();
+                                    let _ = window.set_focus();
+                                }
+                            }
+                        }
+                    }
+                })
+                .build(&handle)?;
+
             Ok(())
         })
-        .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
+        .on_window_event(|window, event| match event {
+            // 关闭窗口时拦截：不真正销毁，而是隐藏到托盘
+            WindowEvent::CloseRequested { api, .. } => {
+                info!("窗口关闭请求：隐藏到系统托盘（非退出）");
+                api.prevent_close();
+                let _ = window.hide();
+            }
+            // 窗口被销毁（走托盘退出流程时才会到这里）：清理 sidecar
+            WindowEvent::Destroyed => {
                 if let Some(state) = window.try_state::<AppState>() {
                     state.sidecar.kill();
                 }
             }
+            _ => {}
         })
         .invoke_handler(tauri::generate_handler![
             commands::ping,

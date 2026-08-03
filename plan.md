@@ -72,6 +72,16 @@
     - watch_sell  → 关注减仓
     - strong_sell → 减仓/清仓
 - 周期可切：日线（默认 750 根 ≈ 3 年）/周线（156 根）/月线（36 根）
+- 系统托盘（Windows）：
+    - Cargo.toml: tauri 加 tray-icon feature
+    - 关闭主窗口按钮（X）不退出应用，改为拦截 CloseRequested → 隐藏窗口到托盘
+    - 托盘图标 tooltip: "Watch Ticket · 行情监听"，图标复用应用 default_window_icon
+    - 左键单击托盘：切换主窗口显示/隐藏（is_visible → hide 或 show+unminimize+set_focus）
+    - 右键菜单：
+      * "关于 Watch Ticket vX.Y.Z"（disabled，仅展示运行时版本号，来自 package_info）
+      * 分隔线
+      * "退出"（app.exit(0) 触发 Destroyed → 清理 sidecar）
+    - Destroyed 事件保留原逻辑（sidecar.kill），只在真正退出时触发
 
 
 后续可扩展（未做）：
