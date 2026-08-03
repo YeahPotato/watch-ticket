@@ -27,7 +27,8 @@ export type SortField =
   | "price"
   | "change_pct"
   | "composite_score"
-  | "updated_at";
+  | "updated_at"
+  | "manual";
 
 export type SortDirection = "asc" | "desc";
 
@@ -38,6 +39,7 @@ export interface SortState {
 
 const SORT_STORAGE_KEY = "analysis_widget_sort";
 const HIDDEN_STORAGE_KEY = "analysis_widget_hidden";
+const MANUAL_ORDER_STORAGE_KEY = "analysis_widget_manual_order";
 const DEFAULT_SORT: SortState = { field: "composite_score", direction: "desc" };
 
 interface State {
@@ -57,6 +59,10 @@ interface State {
   /** 在量化分析表里被"删除"（隐藏）的 symbol 列表。不动 subscriptions 本身。 */
   hidden: string[];
   hiddenLoaded: boolean;
+
+  /** 用户手动拖拽产生的 symbol 顺序（量化分析私有）。sort.field=manual 时生效。 */
+  manualOrder: string[];
+  manualOrderLoaded: boolean;
 
   refreshOne: (
     symbol: string,
@@ -90,6 +96,11 @@ interface State {
   unhide: (symbol: string) => void;
   /** 全部恢复 */
   unhideAll: () => void;
+
+  /** 手动顺序：从 SQLite 载入（首次挂载），并按当前 subscriptions 做交集清理孤儿 */
+  loadManualOrder: () => Promise<void>;
+  /** 应用新的手动顺序（同时自动切 sort → manual/asc），保存到 SQLite */
+  applyManualOrder: (order: string[]) => void;
 }
 
 const CONCURRENCY = 3;
@@ -117,6 +128,17 @@ function scheduleSaveHidden(hidden: string[]) {
     api
       .updateSetting(HIDDEN_STORAGE_KEY, JSON.stringify(hidden))
       .catch((e) => console.warn("保存隐藏列表失败", e));
+  }, 300);
+}
+
+// 手动顺序写库 debounce
+let saveManualOrderTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleSaveManualOrder(order: string[]) {
+  if (saveManualOrderTimer) clearTimeout(saveManualOrderTimer);
+  saveManualOrderTimer = setTimeout(() => {
+    api
+      .updateSetting(MANUAL_ORDER_STORAGE_KEY, JSON.stringify(order))
+      .catch((e) => console.warn("保存手动排序失败", e));
   }, 300);
 }
 
@@ -187,6 +209,8 @@ export const useAnalysisStore = create<State>((set, get) => ({
   sortLoaded: false,
   hidden: [],
   hiddenLoaded: false,
+  manualOrder: [],
+  manualOrderLoaded: false,
 
   refreshOne: async (symbol, period = "1d", bars) => {
     set((s) => ({
@@ -268,7 +292,7 @@ export const useAnalysisStore = create<State>((set, get) => ({
     if (refCount === 1) {
       startTimer();
     }
-    // 首次挂载时懒加载排序 & 隐藏列表
+    // 首次挂载时懒加载排序 & 隐藏列表 & 手动顺序
     if (!get().sortLoaded) {
       get()
         .loadSort()
@@ -277,6 +301,11 @@ export const useAnalysisStore = create<State>((set, get) => ({
     if (!get().hiddenLoaded) {
       get()
         .loadHidden()
+        .catch(() => undefined);
+    }
+    if (!get().manualOrderLoaded) {
+      get()
+        .loadManualOrder()
         .catch(() => undefined);
     }
   },
@@ -373,5 +402,46 @@ export const useAnalysisStore = create<State>((set, get) => ({
     if (get().hidden.length === 0) return;
     set({ hidden: [] });
     scheduleSaveHidden([]);
+  },
+
+  loadManualOrder: async () => {
+    try {
+      const raw = await api.getSetting(MANUAL_ORDER_STORAGE_KEY);
+      let list: string[] = [];
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            list = parsed.filter((x): x is string => typeof x === "string");
+          }
+        } catch {
+          // 解析失败按空处理
+        }
+      }
+      // 与当前 subscriptions 求交集，去掉孤儿
+      const subs = useMarketStore.getState().subscriptions;
+      const valid = new Set(subs.map((s) => s.symbol));
+      const cleaned = list.filter((sym) => valid.has(sym));
+      set({ manualOrder: cleaned, manualOrderLoaded: true });
+      if (cleaned.length !== list.length) {
+        api
+          .updateSetting(MANUAL_ORDER_STORAGE_KEY, JSON.stringify(cleaned))
+          .catch(() => undefined);
+      }
+    } catch (e) {
+      console.debug("载入手动顺序失败，使用空", e);
+      set({ manualOrder: [], manualOrderLoaded: true });
+    }
+  },
+
+  applyManualOrder: (order) => {
+    set({
+      manualOrder: order,
+      // 拖拽后自动切到手动排序模式
+      sort: { field: "manual", direction: "asc" },
+    });
+    scheduleSaveManualOrder(order);
+    // sort 也一起持久化（复用现有 debounce）
+    scheduleSaveSort({ field: "manual", direction: "asc" });
   },
 }));

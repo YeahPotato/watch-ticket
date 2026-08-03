@@ -58,6 +58,13 @@
     - 齿轮菜单里点 item 阻止默认关闭，方便批量恢复
     - 载入时与 subscriptions 求交集，自动清理孤儿（用户在别处删自选后隐藏列表里的残留 symbol）
     - refreshAll / 自动 tick 均只作用于可见列表，避免后台白跑分析
+- 手动拖拽排序（@dnd-kit）：
+    - 整行可拖，PointerSensor distance=5px 阈值避免误触发单击
+    - 拖动自动切 sort.field='manual'，与字段排序并存
+    - 手动模式下标题栏出现「手动排序中 · 恢复」按钮，点击回到默认（评级降序）
+    - 拖拽结果持久化到 SQLite settings（key: analysis_widget_manual_order）
+    - 隐藏的票在 manualOrder 中保留位置（恢复后回到原位）
+    - 载入时与 subscriptions 求交集清理孤儿
 - 建议动作映射：
     - strong_buy  → 建仓/加仓
     - watch_buy   → 关注买点

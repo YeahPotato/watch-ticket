@@ -13,6 +13,21 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, RefreshCw, Loader2, Trash2, Settings2 } from "lucide-react";
+import {
+  DndContext,
+  closestCenter,
+  PointerSensor,
+  useSensor,
+  useSensors,
+  type DragEndEvent,
+} from "@dnd-kit/core";
+import {
+  SortableContext,
+  arrayMove,
+  useSortable,
+  verticalListSortingStrategy,
+} from "@dnd-kit/sortable";
+import { CSS } from "@dnd-kit/utilities";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -221,6 +236,39 @@ function PriceCell({
   );
 }
 
+/**
+ * 可排序的表格行：包裹 useSortable，把 transform/listeners 应用到 <TableRow>。
+ * 整行都作为拖拽触发区，但通过 PointerSensor 的 5px 距离阈值避免误触发单击。
+ */
+function SortableAnalysisRow({
+  id,
+  children,
+}: {
+  id: string;
+  children: React.ReactNode;
+}) {
+  const {
+    attributes,
+    listeners,
+    setNodeRef,
+    transform,
+    transition,
+    isDragging,
+  } = useSortable({ id });
+  const style: React.CSSProperties = {
+    transform: CSS.Transform.toString(transform),
+    transition,
+    opacity: isDragging ? 0.4 : 1,
+    // 拖拽时给一个明显的光标提示；listeners 挂在 <tr> 上，整行可拖
+    cursor: isDragging ? "grabbing" : "grab",
+  };
+  return (
+    <TableRow ref={setNodeRef} style={style} {...attributes} {...listeners}>
+      {children}
+    </TableRow>
+  );
+}
+
 /** 备注单元格：可编辑输入框，失焦保存；Enter 也保存，Esc 取消 */
 function NoteCell({ symbol, value }: { symbol: string; value: string }) {
   const updateNote = useMarketStore((s) => s.updateNote);
@@ -278,6 +326,8 @@ export function AnalysisWidget({ onClose }: Props) {
   const hide = useAnalysisStore((s) => s.hide);
   const unhide = useAnalysisStore((s) => s.unhide);
   const unhideAll = useAnalysisStore((s) => s.unhideAll);
+  const manualOrder = useAnalysisStore((s) => s.manualOrder);
+  const applyManualOrder = useAnalysisStore((s) => s.applyManualOrder);
 
   const [period, setPeriod] = useState<"1d" | "1w" | "1M">("1d");
 
@@ -303,9 +353,22 @@ export function AnalysisWidget({ onClose }: Props) {
   /**
    * 按 sort 状态排序 visibleSubscriptions。
    * null 值统一沉底（无论升降），保持相对顺序稳定。
+   * manual 模式：按 manualOrder 数组顺序，未在其中的 symbol 沉底。
    */
   const sortedSubscriptions = useMemo(() => {
     if (!sort) return visibleSubscriptions;
+    // manual 模式单独处理：直接按数组下标排
+    if (sort.field === "manual") {
+      const idxMap = new Map(manualOrder.map((sym, i) => [sym, i]));
+      return [...visibleSubscriptions].sort((a, b) => {
+        const ia = idxMap.get(a.symbol);
+        const ib = idxMap.get(b.symbol);
+        if (ia == null && ib == null) return 0;
+        if (ia == null) return 1;
+        if (ib == null) return -1;
+        return ia - ib;
+      });
+    }
     const dir = sort.direction === "asc" ? 1 : -1;
 
     const getValue = (sub: (typeof subscriptions)[number]): string | number | null => {
@@ -324,6 +387,9 @@ export function AnalysisWidget({ onClose }: Props) {
           return entry?.report?.composite_score ?? null;
         case "updated_at":
           return entry?.updatedAt ? entry.updatedAt : null;
+        case "manual":
+          // 已在上方分支处理，兜底
+          return null;
       }
     };
 
@@ -339,7 +405,7 @@ export function AnalysisWidget({ onClose }: Props) {
       }
       return ((va as number) - (vb as number)) * dir;
     });
-  }, [visibleSubscriptions, subscriptions, sort, quotes, reports]);
+  }, [visibleSubscriptions, subscriptions, sort, quotes, reports, manualOrder]);
 
   // 挂载/卸载：注册引用计数，管理全局定时器生命周期
   useEffect(() => {
@@ -362,6 +428,47 @@ export function AnalysisWidget({ onClose }: Props) {
 
   const handleRefreshOne = (symbol: string) => {
     refreshOne(symbol, period, currentPeriod.bars).catch(() => undefined);
+  };
+
+  // ==================== 行拖拽排序 ====================
+  // PointerSensor 用 5px 距离阈值，避免 shadcn Button/输入框的单击被误判为拖拽
+  const sensors = useSensors(
+    useSensor(PointerSensor, { activationConstraint: { distance: 5 } }),
+  );
+
+  const handleDragEnd = (event: DragEndEvent) => {
+    const { active, over } = event;
+    if (!over || active.id === over.id) return;
+
+    // 当前排序视图下的 symbol 序列（即用户实际看到的顺序）
+    const currentVisibleOrder = sortedSubscriptions.map((s) => s.symbol);
+    const oldIndex = currentVisibleOrder.indexOf(String(active.id));
+    const newIndex = currentVisibleOrder.indexOf(String(over.id));
+    if (oldIndex < 0 || newIndex < 0) return;
+
+    const reorderedVisible = arrayMove(currentVisibleOrder, oldIndex, newIndex);
+
+    // 合并到完整 manualOrder：
+    // 1. 隐藏的票保持原位（在 manualOrder 中已存在的位置）
+    // 2. 未在 manualOrder 里的新自选追加末尾
+    // 简化策略：
+    //   allSymbols = subscriptions 全集
+    //   newOrder = reorderedVisible + (allSymbols - reorderedVisible 里的隐藏部分，按其在原 manualOrder 中的位置补齐)
+    const allSymbols = subscriptions.map((s) => s.symbol);
+    const reorderedSet = new Set(reorderedVisible);
+    const remaining = allSymbols.filter((sym) => !reorderedSet.has(sym));
+    // remaining（隐藏 + 未在原 manualOrder 的新票）按原 manualOrder 的相对位置排；不在其中的追加末尾
+    remaining.sort((a, b) => {
+      const ia = manualOrder.indexOf(a);
+      const ib = manualOrder.indexOf(b);
+      if (ia === -1 && ib === -1) return 0;
+      if (ia === -1) return 1;
+      if (ib === -1) return -1;
+      return ia - ib;
+    });
+    const nextOrder = [...reorderedVisible, ...remaining];
+
+    applyManualOrder(nextOrder);
   };
 
   /** 可排序表头小组件 */
@@ -493,6 +600,17 @@ export function AnalysisWidget({ onClose }: Props) {
           </DropdownMenuContent>
         </DropdownMenu>
       )}
+      {sort?.field === "manual" && (
+        <Button
+          size="sm"
+          variant="ghost"
+          className="h-6 px-2 text-xs text-muted-foreground"
+          onClick={() => cycleSort("composite_score")}
+          title="已启用手动排序，点击恢复默认（评级降序）"
+        >
+          手动排序中 · 恢复
+        </Button>
+      )}
       <label
         className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none"
         title="交易时段内每分钟自动刷新"
@@ -515,144 +633,155 @@ export function AnalysisWidget({ onClose }: Props) {
             尚无自选。请先添加自选后再来做量化分析。
           </div>
         ) : (
-          <Table>
-            <TableHeader>
-              <TableRow>
-                <TableHead className="w-16">市场</TableHead>
-                <SortableHead field="symbol">代码</SortableHead>
-                <SortableHead field="name">名称</SortableHead>
-                <SortableHead field="price" align="right">
-                  现价
-                </SortableHead>
-                <SortableHead field="change_pct" align="right">
-                  涨跌幅
-                </SortableHead>
-                <SortableHead field="composite_score">评级</SortableHead>
-                <TableHead>建议动作</TableHead>
-                <TableHead className="text-right">建议买入价</TableHead>
-                <TableHead className="text-right">建议卖出价</TableHead>
-                <TableHead>备注</TableHead>
-                <SortableHead field="updated_at">分析时间</SortableHead>
-                <TableHead className="w-20"></TableHead>
-              </TableRow>
-            </TableHeader>
-            <TableBody>
-              {sortedSubscriptions.map((sub) => {
-                const q = quotes[sub.symbol];
-                const entry = reports[sub.symbol];
-                const report = entry?.report;
-                const meta = report ? RATING_META[report.rating] : null;
-                const loading = entry?.loading ?? false;
-                return (
-                  <TableRow key={sub.symbol}>
-                    <TableCell>
-                      <Badge
-                        className={
-                          MARKET_COLOR[sub.market] ??
-                          "bg-muted text-muted-foreground"
-                        }
-                      >
-                        {sub.market}
-                      </Badge>
-                    </TableCell>
-                    <TableCell className="font-mono">
-                      {sub.symbol.split(":")[1] ?? sub.symbol}
-                    </TableCell>
-                    <TableCell>{q?.name ?? sub.name ?? "-"}</TableCell>
-                    <TableCell className="text-right font-mono">
-                      {formatPrice(q?.price)}
-                    </TableCell>
-                    <TableCell
-                      className={`text-right font-mono ${upDownClass(q?.change_pct)}`}
-                    >
-                      {formatPct(q?.change_pct)}
-                    </TableCell>
-                    <TableCell>
-                      {meta ? (
-                        <span className={meta.className}>{meta.label}</span>
-                      ) : entry?.error ? (
-                        <span
-                          className="text-xs text-muted-foreground"
-                          title={entry.error}
+          <DndContext
+            sensors={sensors}
+            collisionDetection={closestCenter}
+            onDragEnd={handleDragEnd}
+          >
+            <Table>
+              <TableHeader>
+                <TableRow>
+                  <TableHead className="w-16">市场</TableHead>
+                  <SortableHead field="symbol">代码</SortableHead>
+                  <SortableHead field="name">名称</SortableHead>
+                  <SortableHead field="price" align="right">
+                    现价
+                  </SortableHead>
+                  <SortableHead field="change_pct" align="right">
+                    涨跌幅
+                  </SortableHead>
+                  <SortableHead field="composite_score">评级</SortableHead>
+                  <TableHead>建议动作</TableHead>
+                  <TableHead className="text-right">建议买入价</TableHead>
+                  <TableHead className="text-right">建议卖出价</TableHead>
+                  <TableHead>备注</TableHead>
+                  <SortableHead field="updated_at">分析时间</SortableHead>
+                  <TableHead className="w-20"></TableHead>
+                </TableRow>
+              </TableHeader>
+              <SortableContext
+                items={sortedSubscriptions.map((s) => s.symbol)}
+                strategy={verticalListSortingStrategy}
+              >
+                <TableBody>
+                  {sortedSubscriptions.map((sub) => {
+                    const q = quotes[sub.symbol];
+                    const entry = reports[sub.symbol];
+                    const report = entry?.report;
+                    const meta = report ? RATING_META[report.rating] : null;
+                    const loading = entry?.loading ?? false;
+                    return (
+                      <SortableAnalysisRow key={sub.symbol} id={sub.symbol}>
+                        <TableCell>
+                          <Badge
+                            className={
+                              MARKET_COLOR[sub.market] ??
+                              "bg-muted text-muted-foreground"
+                            }
+                          >
+                            {sub.market}
+                          </Badge>
+                        </TableCell>
+                        <TableCell className="font-mono">
+                          {sub.symbol.split(":")[1] ?? sub.symbol}
+                        </TableCell>
+                        <TableCell>{q?.name ?? sub.name ?? "-"}</TableCell>
+                        <TableCell className="text-right font-mono">
+                          {formatPrice(q?.price)}
+                        </TableCell>
+                        <TableCell
+                          className={`text-right font-mono ${upDownClass(q?.change_pct)}`}
                         >
-                          失败
-                        </span>
-                      ) : (
-                        <span className="text-muted-foreground">—</span>
-                      )}
-                    </TableCell>
-                    <TableCell>
-                      {meta ? (
-                        <span className={meta.className}>{meta.action}</span>
-                      ) : (
-                        <span className="text-xs text-muted-foreground">
-                          {loading ? "分析中…" : "点右侧刷新"}
-                        </span>
-                      )}
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="inline-block text-right">
-                        <PriceCell
-                          side="buy"
-                          suggestion={report?.buy_suggestion ?? null}
-                          currentPrice={q?.price}
-                          avgPrice={report?.avg_price}
-                          avgDeviationPct={report?.avg_deviation_pct}
-                        />
-                      </div>
-                    </TableCell>
-                    <TableCell className="text-right">
-                      <div className="inline-block text-right">
-                        <PriceCell
-                          side="sell"
-                          suggestion={report?.sell_suggestion ?? null}
-                          currentPrice={q?.price}
-                          avgPrice={report?.avg_price}
-                          avgDeviationPct={report?.avg_deviation_pct}
-                        />
-                      </div>
-                    </TableCell>
-                    <TableCell>
-                      <NoteCell
-                        symbol={sub.symbol}
-                        value={sub.note ?? ""}
-                      />
-                    </TableCell>
-                    <TableCell className="text-xs text-muted-foreground">
-                      {entry?.updatedAt ? timeAgo(entry.updatedAt) : "-"}
-                    </TableCell>
-                    <TableCell>
-                      <div className="flex items-center gap-0.5">
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7"
-                          onClick={() => handleRefreshOne(sub.symbol)}
-                          disabled={loading}
-                          title="刷新此票"
-                        >
-                          {loading ? (
-                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          {formatPct(q?.change_pct)}
+                        </TableCell>
+                        <TableCell>
+                          {meta ? (
+                            <span className={meta.className}>{meta.label}</span>
+                          ) : entry?.error ? (
+                            <span
+                              className="text-xs text-muted-foreground"
+                              title={entry.error}
+                            >
+                              失败
+                            </span>
                           ) : (
-                            <RefreshCw className="h-3.5 w-3.5" />
+                            <span className="text-muted-foreground">—</span>
                           )}
-                        </Button>
-                        <Button
-                          variant="ghost"
-                          size="icon"
-                          className="h-7 w-7 text-muted-foreground hover:text-destructive"
-                          onClick={() => hide(sub.symbol)}
-                          title="从量化分析里隐藏（不影响自选）"
-                        >
-                          <Trash2 className="h-3.5 w-3.5" />
-                        </Button>
-                      </div>
-                    </TableCell>
-                  </TableRow>
-                );
-              })}
-            </TableBody>
-          </Table>
+                        </TableCell>
+                        <TableCell>
+                          {meta ? (
+                            <span className={meta.className}>{meta.action}</span>
+                          ) : (
+                            <span className="text-xs text-muted-foreground">
+                              {loading ? "分析中…" : "点右侧刷新"}
+                            </span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-block text-right">
+                            <PriceCell
+                              side="buy"
+                              suggestion={report?.buy_suggestion ?? null}
+                              currentPrice={q?.price}
+                              avgPrice={report?.avg_price}
+                              avgDeviationPct={report?.avg_deviation_pct}
+                            />
+                          </div>
+                        </TableCell>
+                        <TableCell className="text-right">
+                          <div className="inline-block text-right">
+                            <PriceCell
+                              side="sell"
+                              suggestion={report?.sell_suggestion ?? null}
+                              currentPrice={q?.price}
+                              avgPrice={report?.avg_price}
+                              avgDeviationPct={report?.avg_deviation_pct}
+                            />
+                          </div>
+                        </TableCell>
+                        <TableCell>
+                          <NoteCell
+                            symbol={sub.symbol}
+                            value={sub.note ?? ""}
+                          />
+                        </TableCell>
+                        <TableCell className="text-xs text-muted-foreground">
+                          {entry?.updatedAt ? timeAgo(entry.updatedAt) : "-"}
+                        </TableCell>
+                        <TableCell>
+                          <div className="flex items-center gap-0.5">
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7"
+                              onClick={() => handleRefreshOne(sub.symbol)}
+                              disabled={loading}
+                              title="刷新此票"
+                            >
+                              {loading ? (
+                                <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                              ) : (
+                                <RefreshCw className="h-3.5 w-3.5" />
+                              )}
+                            </Button>
+                            <Button
+                              variant="ghost"
+                              size="icon"
+                              className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                              onClick={() => hide(sub.symbol)}
+                              title="从量化分析里隐藏（不影响自选）"
+                            >
+                              <Trash2 className="h-3.5 w-3.5" />
+                            </Button>
+                          </div>
+                        </TableCell>
+                      </SortableAnalysisRow>
+                    );
+                  })}
+                </TableBody>
+              </SortableContext>
+            </Table>
+          </DndContext>
         )}
       </WidgetShell>
     </TooltipProvider>
