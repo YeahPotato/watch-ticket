@@ -37,6 +37,7 @@ export interface SortState {
 }
 
 const SORT_STORAGE_KEY = "analysis_widget_sort";
+const HIDDEN_STORAGE_KEY = "analysis_widget_hidden";
 const DEFAULT_SORT: SortState = { field: "composite_score", direction: "desc" };
 
 interface State {
@@ -52,6 +53,10 @@ interface State {
   /** 表格排序：null 表示不排序，回到 subscriptions 原顺序 */
   sort: SortState | null;
   sortLoaded: boolean;
+
+  /** 在量化分析表里被"删除"（隐藏）的 symbol 列表。不动 subscriptions 本身。 */
+  hidden: string[];
+  hiddenLoaded: boolean;
 
   refreshOne: (
     symbol: string,
@@ -76,6 +81,15 @@ interface State {
   loadSort: () => Promise<void>;
   /** 排序：3 态循环 desc → asc → null（若当前不是该字段则从 desc 开始） */
   cycleSort: (field: SortField) => void;
+
+  /** 隐藏列表：从 SQLite 载入（首次挂载），并按当前 subscriptions 做交集清理孤儿 */
+  loadHidden: () => Promise<void>;
+  /** 把某只票从量化分析隐藏（不动自选） */
+  hide: (symbol: string) => void;
+  /** 恢复单只票 */
+  unhide: (symbol: string) => void;
+  /** 全部恢复 */
+  unhideAll: () => void;
 }
 
 const CONCURRENCY = 3;
@@ -92,6 +106,17 @@ function scheduleSaveSort(sort: SortState | null) {
     api
       .updateSetting(SORT_STORAGE_KEY, JSON.stringify(sort))
       .catch((e) => console.warn("保存排序失败", e));
+  }, 300);
+}
+
+// 隐藏列表写库 debounce
+let saveHiddenTimer: ReturnType<typeof setTimeout> | null = null;
+function scheduleSaveHidden(hidden: string[]) {
+  if (saveHiddenTimer) clearTimeout(saveHiddenTimer);
+  saveHiddenTimer = setTimeout(() => {
+    api
+      .updateSetting(HIDDEN_STORAGE_KEY, JSON.stringify(hidden))
+      .catch((e) => console.warn("保存隐藏列表失败", e));
   }, 300);
 }
 
@@ -119,11 +144,12 @@ async function tick() {
       }),
     );
 
+    const hiddenSet = new Set(state.hidden);
     const targets = subs
-      .filter((s) => marketOpen.get(s.market))
+      .filter((s) => !hiddenSet.has(s.symbol) && marketOpen.get(s.market))
       .map((s) => s.symbol);
     if (targets.length === 0) {
-      // 全部收盘，静默跳过
+      // 全部收盘或全部隐藏，静默跳过
       return;
     }
 
@@ -159,6 +185,8 @@ export const useAnalysisStore = create<State>((set, get) => ({
   autoRefreshBars: 750,
   sort: DEFAULT_SORT,
   sortLoaded: false,
+  hidden: [],
+  hiddenLoaded: false,
 
   refreshOne: async (symbol, period = "1d", bars) => {
     set((s) => ({
@@ -240,10 +268,15 @@ export const useAnalysisStore = create<State>((set, get) => ({
     if (refCount === 1) {
       startTimer();
     }
-    // 首次挂载时懒加载排序
+    // 首次挂载时懒加载排序 & 隐藏列表
     if (!get().sortLoaded) {
       get()
         .loadSort()
+        .catch(() => undefined);
+    }
+    if (!get().hiddenLoaded) {
+      get()
+        .loadHidden()
         .catch(() => undefined);
     }
   },
@@ -287,5 +320,58 @@ export const useAnalysisStore = create<State>((set, get) => ({
     }
     set({ sort: next });
     scheduleSaveSort(next);
+  },
+
+  loadHidden: async () => {
+    try {
+      const raw = await api.getSetting(HIDDEN_STORAGE_KEY);
+      let list: string[] = [];
+      if (raw) {
+        try {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed)) {
+            list = parsed.filter((x): x is string => typeof x === "string");
+          }
+        } catch {
+          // 解析失败按空处理
+        }
+      }
+      // 与当前 subscriptions 求交集，去掉孤儿（用户可能已在其他 widget 删除自选）
+      const subs = useMarketStore.getState().subscriptions;
+      const valid = new Set(subs.map((s) => s.symbol));
+      const cleaned = list.filter((sym) => valid.has(sym));
+      set({ hidden: cleaned, hiddenLoaded: true });
+      // 若清理掉了孤儿，回写一次（不 debounce，避免和后续用户操作抢时序）
+      if (cleaned.length !== list.length) {
+        api
+          .updateSetting(HIDDEN_STORAGE_KEY, JSON.stringify(cleaned))
+          .catch(() => undefined);
+      }
+    } catch (e) {
+      console.debug("载入隐藏列表失败，使用空", e);
+      set({ hidden: [], hiddenLoaded: true });
+    }
+  },
+
+  hide: (symbol) => {
+    const cur = get().hidden;
+    if (cur.includes(symbol)) return;
+    const next = [...cur, symbol];
+    set({ hidden: next });
+    scheduleSaveHidden(next);
+  },
+
+  unhide: (symbol) => {
+    const cur = get().hidden;
+    if (!cur.includes(symbol)) return;
+    const next = cur.filter((s) => s !== symbol);
+    set({ hidden: next });
+    scheduleSaveHidden(next);
+  },
+
+  unhideAll: () => {
+    if (get().hidden.length === 0) return;
+    set({ hidden: [] });
+    scheduleSaveHidden([]);
   },
 }));

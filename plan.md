@@ -51,6 +51,13 @@
     - vite.config.ts 加 process.env.NODE_ENV define，修复 react-draggable 在浏览器抛 ReferenceError
     - Dashboard 加 draggableCancel（button/input/select/label 等交互元素）避免误触发拖动
     - index.css 覆盖 handle 样式（内嵌 18×18 muted 小方块，hover 高亮）+ placeholder 换主题色淡透明
+- 表内隐藏（不动自选）：
+    - 每行操作列加垃圾桶按钮，一键从量化分析里隐藏该票（其他 widget 不受影响）
+    - 隐藏列表持久化到 SQLite settings（key: analysis_widget_hidden）
+    - 标题栏显示 `visible/total`，有隐藏时旁边出齿轮菜单，可单独恢复或全部恢复
+    - 齿轮菜单里点 item 阻止默认关闭，方便批量恢复
+    - 载入时与 subscriptions 求交集，自动清理孤儿（用户在别处删自选后隐藏列表里的残留 symbol）
+    - refreshAll / 自动 tick 均只作用于可见列表，避免后台白跑分析
 - 建议动作映射：
     - strong_buy  → 建仓/加仓
     - watch_buy   → 关注买点

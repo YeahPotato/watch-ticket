@@ -12,10 +12,18 @@
  */
 
 import { useEffect, useMemo, useState } from "react";
-import { ArrowDown, ArrowUp, RefreshCw, Loader2 } from "lucide-react";
+import { ArrowDown, ArrowUp, RefreshCw, Loader2, Trash2, Settings2 } from "lucide-react";
 
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuLabel,
+  DropdownMenuSeparator,
+  DropdownMenuTrigger,
+} from "@/components/ui/dropdown-menu";
 import {
   Select,
   SelectContent,
@@ -266,6 +274,10 @@ export function AnalysisWidget({ onClose }: Props) {
   const unregister = useAnalysisStore((s) => s.unregister);
   const sort = useAnalysisStore((s) => s.sort);
   const cycleSort = useAnalysisStore((s) => s.cycleSort);
+  const hidden = useAnalysisStore((s) => s.hidden);
+  const hide = useAnalysisStore((s) => s.hide);
+  const unhide = useAnalysisStore((s) => s.unhide);
+  const unhideAll = useAnalysisStore((s) => s.unhideAll);
 
   const [period, setPeriod] = useState<"1d" | "1w" | "1M">("1d");
 
@@ -274,12 +286,26 @@ export function AnalysisWidget({ onClose }: Props) {
     [period],
   );
 
+  /** 先过滤掉用户在量化分析里隐藏的票（不动 subscriptions 本身） */
+  const visibleSubscriptions = useMemo(() => {
+    if (hidden.length === 0) return subscriptions;
+    const hidSet = new Set(hidden);
+    return subscriptions.filter((s) => !hidSet.has(s.symbol));
+  }, [subscriptions, hidden]);
+
+  /** 已隐藏但仍在自选中的票（用于齿轮菜单展示 + 恢复） */
+  const hiddenSubscriptions = useMemo(() => {
+    if (hidden.length === 0) return [];
+    const hidSet = new Set(hidden);
+    return subscriptions.filter((s) => hidSet.has(s.symbol));
+  }, [subscriptions, hidden]);
+
   /**
-   * 按 sort 状态排序 subscriptions。
+   * 按 sort 状态排序 visibleSubscriptions。
    * null 值统一沉底（无论升降），保持相对顺序稳定。
    */
   const sortedSubscriptions = useMemo(() => {
-    if (!sort) return subscriptions;
+    if (!sort) return visibleSubscriptions;
     const dir = sort.direction === "asc" ? 1 : -1;
 
     const getValue = (sub: (typeof subscriptions)[number]): string | number | null => {
@@ -301,7 +327,7 @@ export function AnalysisWidget({ onClose }: Props) {
       }
     };
 
-    return [...subscriptions].sort((a, b) => {
+    return [...visibleSubscriptions].sort((a, b) => {
       const va = getValue(a);
       const vb = getValue(b);
       // null 值统一沉底
@@ -313,7 +339,7 @@ export function AnalysisWidget({ onClose }: Props) {
       }
       return ((va as number) - (vb as number)) * dir;
     });
-  }, [subscriptions, sort, quotes, reports]);
+  }, [visibleSubscriptions, subscriptions, sort, quotes, reports]);
 
   // 挂载/卸载：注册引用计数，管理全局定时器生命周期
   useEffect(() => {
@@ -329,7 +355,8 @@ export function AnalysisWidget({ onClose }: Props) {
   }, [period, currentPeriod.bars, setAutoRefreshParams]);
 
   const handleRefreshAll = () => {
-    const symbols = subscriptions.map((s) => s.symbol);
+    // 只刷新可见的票（隐藏的不参与，避免白跑）
+    const symbols = visibleSubscriptions.map((s) => s.symbol);
     refreshAll(symbols, period, currentPeriod.bars).catch(() => undefined);
   };
 
@@ -380,7 +407,13 @@ export function AnalysisWidget({ onClose }: Props) {
 
   const title = (
     <div className="flex items-center gap-2">
-      <span>量化分析（{subscriptions.length}）</span>
+      <span>
+        量化分析（
+        {hidden.length > 0
+          ? `${visibleSubscriptions.length}/${subscriptions.length}`
+          : subscriptions.length}
+        ）
+      </span>
       <Select
         value={period}
         onValueChange={(v) => setPeriod(v as typeof period)}
@@ -401,7 +434,7 @@ export function AnalysisWidget({ onClose }: Props) {
         variant="outline"
         className="h-6 px-2"
         onClick={handleRefreshAll}
-        disabled={batchLoading || subscriptions.length === 0}
+        disabled={batchLoading || visibleSubscriptions.length === 0}
       >
         {batchLoading ? (
           <Loader2 className="mr-1 h-3 w-3 animate-spin" />
@@ -410,6 +443,56 @@ export function AnalysisWidget({ onClose }: Props) {
         )}
         全部刷新
       </Button>
+      {hiddenSubscriptions.length > 0 && (
+        <DropdownMenu>
+          <DropdownMenuTrigger asChild>
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-6 px-2 text-xs text-muted-foreground"
+              title={`${hiddenSubscriptions.length} 项已隐藏，点击恢复`}
+            >
+              <Settings2 className="mr-1 h-3 w-3" />
+              已隐藏 {hiddenSubscriptions.length}
+            </Button>
+          </DropdownMenuTrigger>
+          <DropdownMenuContent align="end" className="max-h-80 w-64 overflow-auto">
+            <DropdownMenuLabel className="flex items-center justify-between">
+              <span>已隐藏（点击恢复）</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="h-6 px-2 text-xs"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  unhideAll();
+                }}
+              >
+                全部恢复
+              </Button>
+            </DropdownMenuLabel>
+            <DropdownMenuSeparator />
+            {hiddenSubscriptions.map((sub) => (
+              <DropdownMenuItem
+                key={sub.symbol}
+                className="flex items-center justify-between gap-2 text-xs"
+                onSelect={(e) => {
+                  // 阻止默认关闭菜单，方便用户批量恢复
+                  e.preventDefault();
+                  unhide(sub.symbol);
+                }}
+              >
+                <span className="font-mono">
+                  {sub.symbol.split(":")[1] ?? sub.symbol}
+                </span>
+                <span className="truncate text-muted-foreground">
+                  {sub.name ?? "-"}
+                </span>
+              </DropdownMenuItem>
+            ))}
+          </DropdownMenuContent>
+        </DropdownMenu>
+      )}
       <label
         className="flex items-center gap-1 text-xs text-muted-foreground cursor-pointer select-none"
         title="交易时段内每分钟自动刷新"
@@ -450,7 +533,7 @@ export function AnalysisWidget({ onClose }: Props) {
                 <TableHead className="text-right">建议卖出价</TableHead>
                 <TableHead>备注</TableHead>
                 <SortableHead field="updated_at">分析时间</SortableHead>
-                <TableHead className="w-12"></TableHead>
+                <TableHead className="w-20"></TableHead>
               </TableRow>
             </TableHeader>
             <TableBody>
@@ -539,20 +622,31 @@ export function AnalysisWidget({ onClose }: Props) {
                       {entry?.updatedAt ? timeAgo(entry.updatedAt) : "-"}
                     </TableCell>
                     <TableCell>
-                      <Button
-                        variant="ghost"
-                        size="icon"
-                        className="h-7 w-7"
-                        onClick={() => handleRefreshOne(sub.symbol)}
-                        disabled={loading}
-                        title="刷新此票"
-                      >
-                        {loading ? (
-                          <Loader2 className="h-3.5 w-3.5 animate-spin" />
-                        ) : (
-                          <RefreshCw className="h-3.5 w-3.5" />
-                        )}
-                      </Button>
+                      <div className="flex items-center gap-0.5">
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7"
+                          onClick={() => handleRefreshOne(sub.symbol)}
+                          disabled={loading}
+                          title="刷新此票"
+                        >
+                          {loading ? (
+                            <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                          ) : (
+                            <RefreshCw className="h-3.5 w-3.5" />
+                          )}
+                        </Button>
+                        <Button
+                          variant="ghost"
+                          size="icon"
+                          className="h-7 w-7 text-muted-foreground hover:text-destructive"
+                          onClick={() => hide(sub.symbol)}
+                          title="从量化分析里隐藏（不影响自选）"
+                        >
+                          <Trash2 className="h-3.5 w-3.5" />
+                        </Button>
+                      </div>
                     </TableCell>
                   </TableRow>
                 );
