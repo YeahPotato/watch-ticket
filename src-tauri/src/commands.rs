@@ -9,7 +9,8 @@ use crate::db;
 use crate::error::{AppError, AppResult};
 use crate::events::{IntradayUpdated, SubscriptionChanged, EV_INTRADAY_UPDATED, EV_SUBSCRIPTION_CHANGED};
 use crate::models::{
-    Alert, AnalysisReport, IntradayPoint, KlinePoint, PingInfo, Quote, SearchItem, Subscription,
+    Alert, AnalysisReport, DividendInfo, IntradayPoint, KlinePoint, PingInfo, Quote, SearchItem,
+    Subscription,
 };
 use crate::repo;
 use crate::state::AppState;
@@ -304,4 +305,22 @@ pub async fn analyze_symbol(
 #[tauri::command]
 pub fn is_market_open(market: String) -> bool {
     crate::market_time::is_market_open(&market)
+}
+
+// =============== 分红派息 ===============
+
+/// 获取指定 symbol 在过去 12 个月的分红汇总（TTM，与东财 F10 口径一致）。
+/// end_date 缺省时 sidecar 会用"今天"作为默认。
+/// 仅支持 A 股 / 港股；美股或不支持的市场返回 dividend_per_share=None。
+#[tauri::command]
+pub async fn get_dividend(
+    state: State<'_, AppState>,
+    symbol: String,
+    end_date: Option<String>,
+) -> AppResult<DividendInfo> {
+    state
+        .ak
+        .get_dividend(&symbol, end_date.as_deref())
+        .await
+        .map_err(|e| AppError::msg(format!("拉取分红失败: {}", e)))
 }

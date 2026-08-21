@@ -10,7 +10,7 @@
 
 import { create } from "zustand";
 
-import { api, type AnalysisReport } from "@/api/tauri";
+import { api, type AnalysisReport, type DividendInfo } from "@/api/tauri";
 import { useMarketStore } from "@/stores/marketStore";
 
 interface Entry {
@@ -18,6 +18,10 @@ interface Entry {
   loading: boolean;
   updatedAt: number;
   error?: string;
+  /** 分红信息（每股派息 / 全部明细）；null 表示未拉取或无数据 */
+  dividend?: DividendInfo | null;
+  /** 分红拉取时间（用于 UI 提示"最新"） */
+  dividendUpdatedAt?: number;
 }
 
 /** 可排序字段 ID（与 AnalysisWidget 表头一一对应） */
@@ -28,6 +32,8 @@ export type SortField =
   | "change_pct"
   | "composite_score"
   | "updated_at"
+  | "dividend_per_share"
+  | "dividend_yield"
   | "manual";
 
 export type SortDirection = "asc" | "desc";
@@ -75,6 +81,9 @@ interface State {
     bars?: number,
   ) => Promise<void>;
   clearOne: (symbol: string) => void;
+
+  /** 单独拉取指定 symbol 的分红（refreshOne 后自动触发；也可手动调） */
+  fetchDividend: (symbol: string) => Promise<void>;
 
   setAutoRefresh: (v: boolean) => void;
   setAutoRefreshParams: (period: string, bars: number) => void;
@@ -220,6 +229,8 @@ export const useAnalysisStore = create<State>((set, get) => ({
           report: s.reports[symbol]?.report ?? null,
           loading: true,
           updatedAt: s.reports[symbol]?.updatedAt ?? 0,
+          dividend: s.reports[symbol]?.dividend ?? null,
+          dividendUpdatedAt: s.reports[symbol]?.dividendUpdatedAt,
         },
       },
     }));
@@ -232,9 +243,16 @@ export const useAnalysisStore = create<State>((set, get) => ({
             report: r,
             loading: false,
             updatedAt: Date.now(),
+            dividend: s.reports[symbol]?.dividend ?? null,
+            dividendUpdatedAt: s.reports[symbol]?.dividendUpdatedAt,
           },
         },
       }));
+      // 分析成功后再拉分红（"延后"策略：先分析后分红，避免网络峰值）
+      // 分红拉取失败不影响 report 主流程
+      get()
+        .fetchDividend(symbol)
+        .catch(() => undefined);
     } catch (e) {
       const msg = (e as { message?: string })?.message ?? String(e);
       set((s) => ({
@@ -245,6 +263,8 @@ export const useAnalysisStore = create<State>((set, get) => ({
             loading: false,
             updatedAt: Date.now(),
             error: msg,
+            dividend: s.reports[symbol]?.dividend ?? null,
+            dividendUpdatedAt: s.reports[symbol]?.dividendUpdatedAt,
           },
         },
       }));
@@ -254,8 +274,15 @@ export const useAnalysisStore = create<State>((set, get) => ({
   refreshAll: async (symbols, period = "1d", bars) => {
     if (symbols.length === 0) return;
     set({ batchLoading: true });
+    // 两阶段：先全部分析完（3 并发），再统一拉分红（3 并发）
+    // 优点：AKShare 请求错开峰值；分析结果先到位，UI 不用等分红也能刷新
     const queue = [...symbols];
     const refreshOne = get().refreshOne;
+    const fetchDividend = get().fetchDividend;
+
+    // 阶段 1：分析（refreshOne 会自身触发分红拉取，但只是"fire and forget"，我们等分析完成即可）
+    // 注意：refreshOne 里已经 fire-and-forget 拉分红，所以这里其实一体化了。
+    // 保留手动的第二阶段作为补齐（如果 refreshOne 里的分红失败，二阶段可以重试）。
     const workers = Array.from({ length: Math.min(CONCURRENCY, queue.length) }, () =>
       (async () => {
         while (queue.length > 0) {
@@ -267,8 +294,54 @@ export const useAnalysisStore = create<State>((set, get) => ({
     );
     try {
       await Promise.all(workers);
+      // 阶段 2 补齐：把仍未拿到 dividend 的票再补一次（refreshOne 里失败或抢占）
+      const state = get();
+      const missing = symbols.filter((sym) => !state.reports[sym]?.dividend);
+      if (missing.length > 0) {
+        const dq = [...missing];
+        const divWorkers = Array.from({ length: Math.min(CONCURRENCY, dq.length) }, () =>
+          (async () => {
+            while (dq.length > 0) {
+              const s = dq.shift();
+              if (!s) return;
+              await fetchDividend(s).catch(() => undefined);
+            }
+          })(),
+        );
+        await Promise.all(divWorkers);
+      }
     } finally {
       set({ batchLoading: false });
+    }
+  },
+
+  /**
+   * 拉取指定 symbol 的去年分红。
+   * - year 缺省 = 上一自然年度（由 sidecar 侧决定）
+   * - 后端已限定只支持 A 股/港股，其它市场返回 dividend_per_share=null
+   * - 拉失败不抛，只在 console 记录
+   */
+  fetchDividend: async (symbol: string) => {
+    try {
+      const info = await api.getDividend(symbol);
+      set((s) => {
+        const prev = s.reports[symbol];
+        return {
+          reports: {
+            ...s.reports,
+            [symbol]: {
+              report: prev?.report ?? null,
+              loading: prev?.loading ?? false,
+              updatedAt: prev?.updatedAt ?? 0,
+              error: prev?.error,
+              dividend: info,
+              dividendUpdatedAt: Date.now(),
+            },
+          },
+        };
+      });
+    } catch (e) {
+      console.debug("拉取分红失败", symbol, e);
     }
   },
 

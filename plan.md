@@ -82,14 +82,45 @@
       * 分隔线
       * "退出"（app.exit(0) 触发 Destroyed → 清理 sidecar）
     - Destroyed 事件保留原逻辑（sidecar.kill），只在真正退出时触发
+- Sidecar 生命周期（Windows Job Object）：
+    - Cargo.toml: winapi 加 jobapi2/processthreadsapi/handleapi/winnt features
+    - sidecar.rs: spawn 成功后立即把子进程加入 Job Object（KILL_ON_JOB_CLOSE 标志）
+    - SidecarHandle 持有 job handle，Drop 时关闭 handle 触发批量 kill
+    - 效果：主进程无论正常退出/崩溃/被 taskkill，Windows 内核都会自动清理 sidecar，
+      避免遗留孤儿进程占用端口 & 内存
+    - 加入 job 失败时只 warn 不阻塞启动（graceful degradation）
+- Sidecar 启动优先级（Dev / Release 差异化）：
+    - Debug 构建（pnpm tauri dev）：**优先跑 python-sidecar/.venv 源码**，找不到才降级 bundled exe
+      * 好处：改 Python 代码后重启 tauri dev 立即生效，无需 PyInstaller 重新打包
+    - Release 构建：优先 bundled exe（PyInstaller 产物），保证发布版无需用户机器有 Python
+    - 通过 cfg!(debug_assertions) 区分
+- 分红派息 / 股息率（TTM，与东财 F10 口径一致）：
+    - sidecar 新增 /dividend?symbol=&end_date= 接口
+      * end_date：TTM 截止日期 YYYY-MM-DD，缺省=今天。归集区间 (end_date - 365 天, end_date]
+      * A 股主源：ak.stock_fhps_detail_em（每 10 股派 X 元 → /10）
+      * 港股主源：ak.stock_hk_dividend_payout_em（"分红方案"正则提取"每股派 X 元"）
+      * 港股副源：ak.stock_hk_fhpx_detail_ths（fallback）
+      * US / 不支持市场：source="unsupported"
+      * 不缓存，每次调用实时拉
+    - main.py 顶部 TQDM_DISABLE=1 环境变量，避免 tqdm 在 Windows pipe stderr 并发写入崩溃
+      （3 并发下多个 akshare 请求会引发 OSError [Errno 22]）
+    - Rust: models::DividendInfo/DividendRecord + akshare_client::get_dividend + commands::get_dividend
+    - 前端 api: getDividend(symbol, endDate?)
+    - analysisStore.Entry 加 dividend/dividendUpdatedAt；新增 fetchDividend 方法
+    - refreshOne 分析成功后自动 fire-and-forget 拉分红
+    - refreshAll 二阶段补齐：分析全部完成后，把仍缺失 dividend 的票再补拉一次（3 并发）
+    - AnalysisWidget 加两列：
+      * 「每股分红」：TTM 12 个月加总（元/股），tooltip 展开明细（除权日 + 金额 + 备注 + 合计 + 截止日）
+      * 「股息率」：前端 useMemo 算 = TTM 分红 / 现价 × 100%，跟随现价实时刷新
+        - ≥5% 深红加粗，3%-5% 红色，<3% 默认色
+      * 两列都支持排序
+      * 无数据统一显示「—」（灰色占位），排序时 null 沉底
+    - 数据结构说明：DividendInfo.year 字段保留兼容语义（=end_date 所在年），实际以 end_date 为准
 
 
 后续可扩展（未做）：
-- 表格排序支持市值 / 股息率（需 sidecar 新增 fundamentals 接口）
-- 回测胜率验证（下一轮：先验证各档位的历史胜率，再绑定仓位分配 + MACD 背离过滤条件）
-- 综合分改为分组加权（趋势/位置/量能），当前 6 指标等权导致位置类三指标（RSI/KDJ/BOLL）变相权重×3
-- MACD_LOOKBACK 按周期自适应（当前硬编码 3 根，周线/月线语义偏宽松）
-- OBV 双时间框架（5 日 + 20 日斜率双确认），减少震荡市翻转
+- 表格支持市值 / PE / PB / ROE 等基本面指标（需 sidecar 新增 fundamentals 接口，比股息更复杂）
+
 
 检查：
 - 查看量化分析里的所有逻辑是否合理 ✅ 已完成一轮审查，修复 3 项（advised clamp / BOLL squeeze 提示 / tooltip 中位数说明）

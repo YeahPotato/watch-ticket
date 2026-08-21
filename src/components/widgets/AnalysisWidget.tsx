@@ -387,6 +387,15 @@ export function AnalysisWidget({ onClose }: Props) {
           return entry?.report?.composite_score ?? null;
         case "updated_at":
           return entry?.updatedAt ? entry.updatedAt : null;
+        case "dividend_per_share":
+          return entry?.dividend?.dividend_per_share ?? null;
+        case "dividend_yield": {
+          // 前端计算：分红 / 现价，×100 得到百分比
+          const div = entry?.dividend?.dividend_per_share;
+          const price = q?.price;
+          if (div == null || price == null || price <= 0) return null;
+          return (div / price) * 100;
+        }
         case "manual":
           // 已在上方分支处理，兜底
           return null;
@@ -654,6 +663,12 @@ export function AnalysisWidget({ onClose }: Props) {
                   <TableHead>建议动作</TableHead>
                   <TableHead className="text-right">建议买入价</TableHead>
                   <TableHead className="text-right">建议卖出价</TableHead>
+                  <SortableHead field="dividend_per_share" align="right">
+                    每股分红
+                  </SortableHead>
+                  <SortableHead field="dividend_yield" align="right">
+                    股息率
+                  </SortableHead>
                   <TableHead>备注</TableHead>
                   <SortableHead field="updated_at">分析时间</SortableHead>
                   <TableHead className="w-20"></TableHead>
@@ -738,6 +753,71 @@ export function AnalysisWidget({ onClose }: Props) {
                               avgDeviationPct={report?.avg_deviation_pct}
                             />
                           </div>
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {entry?.dividend?.dividend_per_share != null ? (
+                            <Tooltip delayDuration={100}>
+                              <TooltipTrigger asChild>
+                                <span className="cursor-help">
+                                  {formatPrice(entry.dividend.dividend_per_share)}
+                                </span>
+                              </TooltipTrigger>
+                              <TooltipContent className="max-w-xs text-left">
+                                <div className="font-semibold mb-1">
+                                  过去 12 个月分红明细
+                                  {entry.dividend.end_date ? (
+                                    <span className="ml-1 text-[10px] opacity-70">
+                                      （截至 {entry.dividend.end_date}）
+                                    </span>
+                                  ) : null}
+                                </div>
+                                <div className="space-y-0.5 font-mono">
+                                  {entry.dividend.records.length === 0 ? (
+                                    <div className="text-[10px] opacity-70">无明细</div>
+                                  ) : (
+                                    entry.dividend.records.map((rec, i) => (
+                                      <div key={i}>
+                                        {rec.ex_date ?? "?"}: {formatPrice(rec.cash_per_share)}
+                                        {rec.note ? (
+                                          <span className="ml-1 text-[10px] opacity-70">
+                                            {rec.note}
+                                          </span>
+                                        ) : null}
+                                      </div>
+                                    ))
+                                  )}
+                                  <div className="mt-1 pt-1 border-t border-white/20 text-[10px] opacity-70">
+                                    合计：{formatPrice(entry.dividend.dividend_per_share)} / 股
+                                  </div>
+                                </div>
+                              </TooltipContent>
+                            </Tooltip>
+                          ) : (
+                            <span className="text-muted-foreground">—</span>
+                          )}
+                        </TableCell>
+                        <TableCell className="text-right font-mono text-xs">
+                          {(() => {
+                            const div = entry?.dividend?.dividend_per_share;
+                            const price = q?.price;
+                            if (div == null || price == null || price <= 0) {
+                              return <span className="text-muted-foreground">—</span>;
+                            }
+                            const yieldPct = (div / price) * 100;
+                            return (
+                              <span
+                                className={
+                                  yieldPct >= 5
+                                    ? "text-red-600 font-semibold"
+                                    : yieldPct >= 3
+                                      ? "text-red-500"
+                                      : ""
+                                }
+                              >
+                                {yieldPct.toFixed(2)}%
+                              </span>
+                            );
+                          })()}
                         </TableCell>
                         <TableCell>
                           <NoteCell

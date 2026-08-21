@@ -23,7 +23,7 @@ from datasource.akshare_ds import AkshareSource
 from datasource.base import DataSource
 from datasource.tencent import TencentSource
 from market_utils import parse_symbol
-from models import IntradayPoint, KlinePoint, Quote, SearchItem
+from models import DividendInfo, IntradayPoint, KlinePoint, Quote, SearchItem
 
 logger = logging.getLogger(__name__)
 
@@ -115,3 +115,14 @@ def search(keyword: str, limit: int = 20) -> List[SearchItem]:
         return _fallback.search(keyword, limit)
     except Exception as e:
         raise RuntimeError(f"搜索失败: {e}")
+
+
+# =============== 分红派息 ===============
+def get_dividend(symbol: str, end_date: str) -> DividendInfo:
+    """获取指定 symbol 在过去 12 个月的分红汇总（TTM，与东财 F10 口径一致）。
+
+    只支持 A 股和港股；美股/其它市场返回 dividend_per_share=None。
+    数据源：AKShare。不做缓存。
+    """
+    from akshare_adapter import get_dividend as _impl
+    return _impl(symbol, end_date)

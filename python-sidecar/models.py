@@ -64,5 +64,29 @@ class SearchItem(BaseModel):
     market: str
 
 
+class DividendRecord(BaseModel):
+    """单笔分红明细。"""
+
+    ex_date: Optional[str] = None          # 除权除息日，"YYYY-MM-DD"
+    cash_per_share: Optional[float] = None # 每股派息（税前含税，元/股）
+    note: Optional[str] = None             # 备注（如"末期股息"/"特别股息"）
+
+
+class DividendInfo(BaseModel):
+    """过去 12 个月（TTM）的分红汇总。
+
+    口径：以除权除息日在 [end_date - 12 months, end_date] 区间的分红加总（税前含税）。
+    这与东财 F10 显示的"股息率"口径一致。
+    dividend_per_share = 该区间所有派息之和（元/股）
+    """
+
+    symbol: str
+    year: int                              # [已废弃语义] 兼容旧版：end_date 所在自然年
+    end_date: Optional[str] = None         # TTM 截止日期，"YYYY-MM-DD"
+    dividend_per_share: Optional[float] = None  # 12 个月加总（元/股）
+    records: list[DividendRecord] = []
+    source: Optional[str] = None
+
+
 class ErrorInfo(BaseModel):
     detail: Any = None

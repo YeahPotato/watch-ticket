@@ -7,7 +7,7 @@ use serde::de::DeserializeOwned;
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
-use crate::models::{ApiEnvelope, IntradayPoint, KlinePoint, Quote, SearchItem};
+use crate::models::{ApiEnvelope, DividendInfo, IntradayPoint, KlinePoint, Quote, SearchItem};
 
 pub struct AkClient {
     base: String,
@@ -101,5 +101,19 @@ impl AkClient {
             ],
         )
         .await
+    }
+
+    /// 获取指定 symbol 在过去 12 个月的分红汇总（TTM）。
+    /// end_date 传 None 时 sidecar 会用"今天"作为默认。
+    pub async fn get_dividend(
+        &self,
+        symbol: &str,
+        end_date: Option<&str>,
+    ) -> AppResult<DividendInfo> {
+        let mut query: Vec<(&str, String)> = vec![("symbol", symbol.to_string())];
+        if let Some(d) = end_date {
+            query.push(("end_date", d.to_string()));
+        }
+        self.get_envelope::<DividendInfo>("/dividend", &query).await
     }
 }

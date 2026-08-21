@@ -148,6 +148,26 @@ export interface RustError {
   message: string;
 }
 
+/** 单笔分红明细 */
+export interface DividendRecord {
+  ex_date: string | null;
+  cash_per_share: number | null;
+  note: string | null;
+}
+
+/** 过去 12 个月（TTM）的分红汇总（税前含税），与东财 F10 口径一致 */
+export interface DividendInfo {
+  symbol: string;
+  /** [已废弃语义] 兼容字段：end_date 所在自然年 */
+  year: number;
+  /** TTM 截止日期，"YYYY-MM-DD" */
+  end_date: string | null;
+  /** 12 个月加总（元/股），无数据时 null */
+  dividend_per_share: number | null;
+  records: DividendRecord[];
+  source: string | null;
+}
+
 export const api = {
   // 自检
   ping: () => invoke<PingInfo>("ping"),
@@ -209,6 +229,10 @@ export const api = {
   // 量化分析
   analyzeSymbol: (symbol: string, period = "1d", bars = 750) =>
     invoke<AnalysisReport>("analyze_symbol", { symbol, period, bars }),
+
+  // 分红派息（过去 12 个月 TTM）；A 股/港股支持，US 返回 dividend_per_share=null
+  getDividend: (symbol: string, endDate?: string) =>
+    invoke<DividendInfo>("get_dividend", { symbol, endDate: endDate ?? null }),
 
   // 交易时段查询（供前端定时任务判断）
   isMarketOpen: (market: string) =>

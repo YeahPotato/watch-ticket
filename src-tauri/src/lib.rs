@@ -183,6 +183,7 @@ pub fn run() {
             commands::clear_alerts,
             commands::analyze_symbol,
             commands::is_market_open,
+            commands::get_dividend,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

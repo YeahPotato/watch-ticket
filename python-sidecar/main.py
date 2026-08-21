@@ -24,10 +24,17 @@ import os
 import socket
 import sys
 
+# 关键：在导入 uvicorn / akshare 之前禁用 tqdm 进度条。
+# tqdm 在 Windows 上被 Rust 侧作为子进程（stdout/stderr 管道 + CREATE_NO_WINDOW）拉起时，
+# 多并发请求下会向 stderr 写 \r 控制序列引发 OSError [Errno 22] Invalid argument，
+# 导致 AKShare 请求随机崩溃。禁用 tqdm 后 akshare 内部循环仍能正常工作，只是没有进度显示。
+os.environ.setdefault("TQDM_DISABLE", "1")
+
 import uvicorn
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
+from routes.dividend import router as dividend_router
 from routes.health import router as health_router
 from routes.intraday import router as intraday_router
 from routes.kline import router as kline_router
@@ -67,6 +74,7 @@ def create_app() -> FastAPI:
     app.include_router(health_router)
     app.include_router(intraday_router)
     app.include_router(kline_router)
+    app.include_router(dividend_router)
 
     return app
 

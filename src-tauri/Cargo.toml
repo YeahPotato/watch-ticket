@@ -56,6 +56,12 @@ chrono-tz = "0.10"
 # 并发容器
 dashmap = "6"
 
-# Windows 隐藏子进程黑窗口
+# Windows 隐藏子进程黑窗口 + Job Object（主进程死亡时连带杀 sidecar）
 [target.'cfg(windows)'.dependencies]
-winapi = { version = "0.3", features = ["winbase"] }
+winapi = { version = "0.3", features = [
+    "winbase",
+    "jobapi2",
+    "processthreadsapi",
+    "handleapi",
+    "winnt",
+] }

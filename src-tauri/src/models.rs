@@ -201,3 +201,31 @@ pub struct AnalysisReport {
     /// 建议减仓价（数据不足时为 None）
     pub sell_suggestion: Option<PriceSuggestion>,
 }
+
+/// 单笔分红明细
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DividendRecord {
+    #[serde(default)]
+    pub ex_date: Option<String>,
+    #[serde(default)]
+    pub cash_per_share: Option<f64>,
+    #[serde(default)]
+    pub note: Option<String>,
+}
+
+/// 过去 12 个月（TTM）的分红汇总（税前含税）
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DividendInfo {
+    pub symbol: String,
+    /// [已废弃语义] 兼容旧版：end_date 所在自然年
+    pub year: i32,
+    /// TTM 截止日期，"YYYY-MM-DD"
+    #[serde(default)]
+    pub end_date: Option<String>,
+    #[serde(default)]
+    pub dividend_per_share: Option<f64>,
+    #[serde(default)]
+    pub records: Vec<DividendRecord>,
+    #[serde(default)]
+    pub source: Option<String>,
+}

@@ -16,6 +16,9 @@ from __future__ import annotations
 
 import logging
 import math
+import os
+import time
+import traceback
 from datetime import datetime, timedelta
 from typing import Any, Iterable
 
@@ -24,9 +27,30 @@ import pandas as pd
 from cachetools import TTLCache
 
 from market_utils import Market, Symbol, parse_symbol
-from models import IntradayPoint, KlinePoint, Quote, SearchItem
+from models import DividendInfo, DividendRecord, IntradayPoint, KlinePoint, Quote, SearchItem
 
 logger = logging.getLogger(__name__)
+
+# ============ 分红专用日志（写文件，方便诊断） ============
+# 文件位置：<akshare_adapter.py 同目录>/dividend.log，追加模式，UTF-8
+_DIVIDEND_LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "dividend.log")
+_dividend_logger = logging.getLogger("dividend_diag")
+if not _dividend_logger.handlers:
+    _dividend_logger.setLevel(logging.DEBUG)
+    _dividend_logger.propagate = False  # 不冒泡到 root，避免污染 sidecar 主日志
+    try:
+        _fh = logging.FileHandler(_DIVIDEND_LOG_PATH, mode="a", encoding="utf-8")
+        _fh.setFormatter(logging.Formatter(
+            fmt="%(asctime)s [%(levelname)s] %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        ))
+        _dividend_logger.addHandler(_fh)
+        _dividend_logger.info("=" * 60)
+        _dividend_logger.info("dividend logger 初始化 · log=%s · cwd=%s · pid=%s",
+                              _DIVIDEND_LOG_PATH, os.getcwd(), os.getpid())
+    except Exception as e:
+        # 文件创建失败降级到 stderr（不阻断 sidecar 启动）
+        logger.warning("dividend.log 打开失败: %s，分红日志将走主 logger", e)
 
 # =============== 缓存 ===============
 # 全表 spot（港股/美股一次性拉几千行），30 秒 TTL
@@ -469,3 +493,302 @@ def search(keyword: str, limit: int = 20) -> list[SearchItem]:
         logger.warning("美股搜索失败: %s", e)
 
     return results[:limit]
+
+
+# =============== 分红派息 ===============
+def _ttm_window(end_date: str) -> tuple[str, str]:
+    """给定截止日期，返回过去 12 个月的 [start, end] 字符串区间。
+
+    end_date 格式 "YYYY-MM-DD"；start = end 往前减 1 年（自然年度对齐同月同日）。
+    """
+    end = datetime.strptime(end_date, "%Y-%m-%d").date()
+    # 简单减 365 天而不是"同月同日减 1 年"，避免 2 月 29 号闰年问题
+    start = end - timedelta(days=365)
+    return start.strftime("%Y-%m-%d"), end.strftime("%Y-%m-%d")
+
+
+def _parse_date_any(v: Any) -> str | None:
+    """把 AKShare 返回的各种日期形式解析成 'YYYY-MM-DD'；失败返回 None。"""
+    if v is None or (isinstance(v, float) and math.isnan(v)):
+        return None
+    # 排除 pandas NaT（NaT 也是 Timestamp 子类型）
+    if v is pd.NaT:
+        return None
+    try:
+        if isinstance(v, pd.Timestamp):
+            if pd.isna(v):
+                return None
+            return v.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+    if isinstance(v, datetime):
+        return v.strftime("%Y-%m-%d")
+    s = str(v).strip()
+    if not s or s in ("nan", "NaT", "-", "--", "None"):
+        return None
+    # 常见格式尝试
+    for fmt in ("%Y-%m-%d", "%Y/%m/%d", "%Y%m%d", "%Y-%m-%d %H:%M:%S"):
+        try:
+            return datetime.strptime(s, fmt).strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    # 尝试 pandas 兜底
+    try:
+        ts = pd.to_datetime(s, errors="coerce")
+        if pd.isna(ts):
+            return None
+        return ts.strftime("%Y-%m-%d")
+    except Exception:
+        return None
+
+
+def _pick_col(df: pd.DataFrame, candidates: list[str]) -> str | None:
+    """在 DataFrame 列名里按候选列表匹配第一个存在的列名。找不到返回 None。"""
+    cols = list(df.columns)
+    for c in candidates:
+        if c in cols:
+            return c
+    # 模糊匹配（子串包含）
+    for c in cols:
+        for cand in candidates:
+            if cand in str(c):
+                return c
+    return None
+
+
+def _dividend_a(code: str, end_date: str) -> DividendInfo:
+    """A 股 TTM 分红明细：以除权除息日在 (end_date - 365d, end_date] 归集。"""
+    start_date, _ = _ttm_window(end_date)
+    end_year = int(end_date.split("-")[0])
+    _dividend_logger.info("[A] 入口 code=%s window=[%s, %s]", code, start_date, end_date)
+    t0 = time.time()
+    try:
+        df = ak.stock_fhps_detail_em(symbol=code)
+    except Exception as e:
+        _dividend_logger.error(
+            "[A] AKShare 请求失败 code=%s exc=%s: %s\n%s",
+            code, type(e).__name__, e, traceback.format_exc(),
+        )
+        logger.warning("A 股分红拉取失败 %s: %s", code, e)
+        return DividendInfo(symbol="", year=end_year, end_date=end_date,
+                            dividend_per_share=None, records=[],
+                            source="akshare-a-empty")
+
+    elapsed = time.time() - t0
+    rows = 0 if df is None else len(df)
+    cols = [] if df is None else list(df.columns)
+    _dividend_logger.info(
+        "[A] AKShare 返回 code=%s rows=%d cols=%s elapsed=%.2fs",
+        code, rows, cols, elapsed,
+    )
+
+    if df is None or df.empty:
+        _dividend_logger.warning("[A] 返回空 df code=%s", code)
+        return DividendInfo(symbol="", year=end_year, end_date=end_date,
+                            dividend_per_share=None, records=[],
+                            source="akshare-a-empty")
+
+    ex_col = _pick_col(df, ["除权除息日"])
+    per10_col = _pick_col(df, ["现金分红-现金分红比例", "现金分红比例"])
+    per_share_col = _pick_col(df, ["每股股利", "每股派息"])
+    _dividend_logger.info(
+        "[A] 列选择 code=%s ex_col=%r per10_col=%r per_share_col=%r",
+        code, ex_col, per10_col, per_share_col,
+    )
+
+    records: list[DividendRecord] = []
+    total: float = 0.0
+    hit = False
+    filtered_hit = 0
+    filtered_no_date = 0
+    filtered_no_cash = 0
+
+    for _, row in df.iterrows():
+        ex_raw = row.get(ex_col) if ex_col else None
+        ex_date = _parse_date_any(ex_raw)
+        if not ex_date:
+            filtered_no_date += 1
+            continue
+        # TTM 窗口过滤：(start_date, end_date]
+        if not (start_date < ex_date <= end_date):
+            continue
+        filtered_hit += 1
+
+        cash: float | None = None
+        if per_share_col is not None:
+            cash = _safe_float(row.get(per_share_col))
+        if cash is None and per10_col is not None:
+            v10 = _safe_float(row.get(per10_col))
+            if v10 is not None:
+                cash = v10 / 10.0
+        if cash is None or cash <= 0:
+            filtered_no_cash += 1
+            continue
+
+        hit = True
+        total += cash
+        records.append(DividendRecord(
+            ex_date=ex_date, cash_per_share=cash, note=None,
+        ))
+
+    _dividend_logger.info(
+        "[A] 过滤统计 code=%s window=(%s, %s]: no_date=%d hit=%d no_cash=%d final=%d total=%.4f",
+        code, start_date, end_date, filtered_no_date, filtered_hit, filtered_no_cash,
+        len(records), total,
+    )
+
+    return DividendInfo(
+        symbol="",
+        year=end_year,
+        end_date=end_date,
+        dividend_per_share=(total if hit else None),
+        records=records,
+        source="akshare-a",
+    )
+
+
+def _dividend_hk(code: str, end_date: str) -> DividendInfo:
+    """港股 TTM 分红明细：按除净日归集到过去 12 个月。"""
+    import re
+
+    start_date, _ = _ttm_window(end_date)
+    end_year = int(end_date.split("-")[0])
+    hk_code = code.zfill(5)
+    _dividend_logger.info("[HK] 入口 code=%s hk_code=%s window=[%s, %s]",
+                          code, hk_code, start_date, end_date)
+    df = None
+    used_source = "akshare-hk-em"
+
+    # 主源：东财
+    t0 = time.time()
+    try:
+        df = ak.stock_hk_dividend_payout_em(symbol=hk_code)
+        _dividend_logger.info(
+            "[HK] 主源(em) 返回 code=%s rows=%d elapsed=%.2fs",
+            hk_code, 0 if df is None else len(df), time.time() - t0,
+        )
+    except Exception as e:
+        _dividend_logger.error(
+            "[HK] 主源(em) 请求失败 code=%s exc=%s: %s",
+            hk_code, type(e).__name__, e,
+        )
+        logger.warning("港股分红主源(em)失败 %s: %s", hk_code, e)
+
+    # 副源：同花顺
+    if df is None or df.empty:
+        t1 = time.time()
+        try:
+            df = ak.stock_hk_fhpx_detail_ths(symbol=hk_code)
+            used_source = "akshare-hk-ths"
+            _dividend_logger.info(
+                "[HK] 副源(ths) 返回 code=%s rows=%d elapsed=%.2fs",
+                hk_code, 0 if df is None else len(df), time.time() - t1,
+            )
+        except Exception as e:
+            _dividend_logger.error(
+                "[HK] 副源(ths) 请求失败 code=%s exc=%s: %s",
+                hk_code, type(e).__name__, e,
+            )
+            logger.warning("港股分红副源(ths)失败 %s: %s", hk_code, e)
+
+    if df is None or df.empty:
+        _dividend_logger.warning("[HK] 主副源均空 code=%s", hk_code)
+        return DividendInfo(symbol="", year=end_year, end_date=end_date,
+                            dividend_per_share=None, records=[],
+                            source="akshare-hk-empty")
+
+    ex_col = _pick_col(df, ["除净日", "除权除息日", "除权日", "除息日"])
+    plan_col = _pick_col(df, ["分红方案", "方案", "派息", "股息"])
+    per_share_col = _pick_col(df, ["每股股息", "每股派息", "每股分红", "分红金额"])
+    _dividend_logger.info(
+        "[HK] 列选择 code=%s ex_col=%r plan_col=%r per_share_col=%r cols=%s",
+        hk_code, ex_col, plan_col, per_share_col, list(df.columns),
+    )
+
+    # "每股派港币5.3元" / "每股派 5.3 港元" / "每股派0.5元"
+    _re_cash = re.compile(
+        r"每股[派分]\s*(?:港币|港元|美元|HKD|USD|人民币|CNY)?\s*([0-9]+(?:\.[0-9]+)?)\s*(?:港?[元币]|HKD|USD|CNY|人民币)?",
+        re.IGNORECASE,
+    )
+
+    records: list[DividendRecord] = []
+    total: float = 0.0
+    hit = False
+    stats_no_date = 0
+    stats_hit = 0
+    stats_no_cash = 0
+
+    for _, row in df.iterrows():
+        ex_date = _parse_date_any(row.get(ex_col)) if ex_col else None
+        if not ex_date:
+            stats_no_date += 1
+            continue
+        # TTM 窗口过滤：(start_date, end_date]
+        if not (start_date < ex_date <= end_date):
+            continue
+        stats_hit += 1
+
+        cash: float | None = None
+        if per_share_col is not None:
+            cash = _safe_float(row.get(per_share_col))
+        if cash is None and plan_col is not None:
+            plan = row.get(plan_col)
+            if plan is not None:
+                m = _re_cash.search(str(plan))
+                if m:
+                    cash = _safe_float(m.group(1))
+        if cash is None or cash <= 0:
+            stats_no_cash += 1
+            continue
+
+        hit = True
+        total += cash
+        note = None
+        if plan_col is not None and row.get(plan_col) is not None:
+            note = str(row.get(plan_col))[:60]
+        records.append(DividendRecord(
+            ex_date=ex_date, cash_per_share=cash, note=note,
+        ))
+
+    _dividend_logger.info(
+        "[HK] 过滤统计 code=%s window=(%s, %s]: no_date=%d hit=%d no_cash=%d final=%d total=%.4f",
+        hk_code, start_date, end_date, stats_no_date, stats_hit, stats_no_cash,
+        len(records), total,
+    )
+
+    return DividendInfo(
+        symbol="",
+        year=end_year,
+        end_date=end_date,
+        dividend_per_share=(total if hit else None),
+        records=records,
+        source=used_source if hit else "akshare-hk-empty",
+    )
+
+
+def get_dividend(symbol: str, end_date: str) -> DividendInfo:
+    """获取指定 symbol 在过去 12 个月的分红汇总（TTM）。
+
+    end_date 为 TTM 截止日期（"YYYY-MM-DD"），归集区间为 (end_date - 365d, end_date]。
+    仅支持 A 股和港股。美股/未支持市场返回 None。
+    数据缺失不抛错，返回 dividend_per_share=None。
+    """
+    _dividend_logger.info(">> get_dividend symbol=%r end_date=%s", symbol, end_date)
+    sym = parse_symbol(symbol)
+    end_year = int(end_date.split("-")[0])
+
+    if sym.is_a_share:
+        info = _dividend_a(sym.code, end_date)
+    elif sym.market.value == "HK":
+        info = _dividend_hk(sym.code, end_date)
+    else:
+        info = DividendInfo(symbol=sym.normalized, year=end_year, end_date=end_date,
+                            dividend_per_share=None, records=[],
+                            source="unsupported")
+
+    info.symbol = sym.normalized
+    _dividend_logger.info(
+        "<< get_dividend symbol=%s → div=%s records=%d source=%s end_date=%s",
+        info.symbol, info.dividend_per_share, len(info.records), info.source, info.end_date,
+    )
+    return info
